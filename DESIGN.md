@@ -165,9 +165,11 @@ internal/marker/   目印の符号化と復号
 internal/pg/       接続、複製の方式、SQL
 internal/branch/   ensure、drop、reset、list、gc、pool、base の手順
 internal/gitx/     git の呼び出し、post-checkout フック、接続先を書き出すファイル
+internal/mcpserver/ MCP のサーバーとツール
+internal/testpg/   結合テストの後片付け（結合テストのときだけビルドする）
 ```
 
-依存は `github.com/jackc/pgx/v5` だけにする。引数の解釈は標準ライブラリの `flag` で行う。
+依存は `github.com/jackc/pgx/v5` と、MCP の公式 Go SDK（`github.com/modelcontextprotocol/go-sdk`、スキーマの推論に `github.com/google/jsonschema-go`）にとどめる。引数の解釈は標準ライブラリの `flag` で行う。
 
 ## テスト
 

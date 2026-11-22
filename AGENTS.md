@@ -61,7 +61,7 @@ pgcheckout drop feat/x
 
 - Do not run `DROP DATABASE` yourself on databases named `<base>__...`. Use `pgcheckout drop`, `pgcheckout gc` or `pgcheckout pool drain`.
 - Do not connect to the base database. To change it: `pgcheckout base open`, apply the change, `pgcheckout base close`.
-- The `url` field contains the password from the admin URL. Do not log it.
+- On the command line, the `url` field contains the password from the admin URL. Do not log it. MCP tool results omit the password.
 
 ## MCP server
 
