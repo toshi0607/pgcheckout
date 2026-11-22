@@ -3,9 +3,11 @@ package branch
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/toshi0607/pgcheckout/internal/config"
 	"github.com/toshi0607/pgcheckout/internal/marker"
@@ -46,5 +48,26 @@ func TestCheckMutationComparesWarnings(t *testing.T) {
 	expected.Marker.Warnings = 3
 	if err := s.checkMutation(t.Context(), db, expected, false, marker.Pool); config.ErrorCode(err) != config.UnmanagedDatabase {
 		t.Fatalf("changed marker error = %v, want unmanaged_database", err)
+	}
+}
+
+func TestRetryableForcedDrop(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"insufficient privilege", fmt.Errorf("drop database: %w", &pgconn.PgError{Code: "42501"}), true},
+		{"database in use", fmt.Errorf("drop database: %w", &pgconn.PgError{Code: "55006"}), true},
+		{"database missing", &pgconn.PgError{Code: "3D000"}, false},
+		{"query canceled", &pgconn.PgError{Code: "57014"}, false},
+		{"context canceled", context.Canceled, false},
+		{"success", nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := retryableForcedDrop(tc.err); got != tc.want {
+				t.Errorf("retryableForcedDrop(%v) = %t, want %t", tc.err, got, tc.want)
+			}
+		})
 	}
 }

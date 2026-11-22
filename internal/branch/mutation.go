@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -58,21 +59,59 @@ func (s *session) dropManaged(ctx context.Context, expected pg.Database, force b
 	default:
 		return unmanaged()
 	}
-	if err := s.checkMutation(ctx, s.Conn, expected, false, kind); err != nil {
-		return err
-	}
+	terminate := force && s.VersionNum < 130000
 	sql := "DROP DATABASE " + pg.Identifier(expected.Name)
-	if force && s.VersionNum >= 130000 {
+	if force && !terminate {
 		sql += " WITH (FORCE)"
-	} else if force {
-		if err := pg.Terminate(ctx, s.Conn, expected.Name); err != nil {
-			return databaseError(err, "")
+	}
+
+	const maxAttempts = 5
+	for attempt := 1; ; attempt++ {
+		checkErr := s.checkMutation(ctx, s.Conn, expected, false, kind)
+		var err error
+		if checkErr == nil && terminate {
+			err = pg.Terminate(ctx, s.Conn, expected.Name)
+			if err == nil {
+				checkErr = s.checkMutation(ctx, s.Conn, expected, false, kind)
+			}
 		}
-		if err := s.checkMutation(ctx, s.Conn, expected, false, kind); err != nil {
+		if checkErr != nil {
+			if attempt > 1 && errors.Is(checkErr, errDatabaseGone) {
+				return nil
+			}
+			return checkErr
+		}
+
+		hint := ""
+		if err == nil {
+			err = pg.Exec(ctx, s.Conn, "drop database", sql)
+			hint = "Use --force to disconnect database sessions."
+		}
+		if !force || attempt == maxAttempts || !retryableForcedDrop(err) {
+			err = databaseError(err, hint)
+			if force {
+				if problem, ok := errors.AsType[*config.Error](err); ok && problem.Code == config.InsufficientPrivilege {
+					problem.Hint = "A session owned by another role is connected and this role may not terminate it. Retry, or disconnect that session."
+				}
+			}
 			return err
 		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(300 * time.Millisecond):
+		}
 	}
-	return databaseError(pg.Exec(ctx, s.Conn, "drop database", sql), "Use --force to disconnect database sessions.")
+}
+
+func retryableForcedDrop(err error) bool {
+	switch pg.State(err) {
+	case "42501", "55006":
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *session) renameManaged(ctx context.Context, from pg.Database, target string, m marker.Marker) error {
