@@ -23,7 +23,7 @@ PostgreSQL 18.7 と AlloyDB Omni 17.10 で結合テストを実行している�
 
 ## 使い始める
 
-インストールする。`pgcheckout` が `PATH` に入る。
+インストールする。バイナリは `$(go env GOPATH)/bin` に置かれるので、このディレクトリを `PATH` に入れておく。
 
 ```bash
 go install ./cmd/pgcheckout
@@ -72,10 +72,10 @@ pgcheckout hook install --env-file .env.pgcheckout
 `.env.pgcheckout` には `DATABASE_URL=...` の 1 行が書かれる。
 フックは、リポジトリの `.git/hooks` に置く。`core.hooksPath` が指す共有のディレクトリには書き込まない。
 
-フックが動くには、次の 2 つが要る。満たされていないとき、フックは何もせずに終わる。
+フックが動くには、次の 2 つが要る。どちらが欠けても `git checkout` 自体は成功し、接続先のファイルは書き換わらない。
 
-- `pgcheckout` が、git を実行する環境の `PATH` に在る。
-- `PGCHECKOUT_ADMIN_URL` が、git を実行する環境に設定されている。ベースの名前は `.pgcheckout.json` に書いてもよい。
+- `pgcheckout` が、git を実行する環境の `PATH` に在る。無い場合、フックは何も出力せずに終わる。
+- `PGCHECKOUT_ADMIN_URL` が、git を実行する環境に設定されている。ベースの名前は `.pgcheckout.json` に書いてもよい。設定が無い場合、フックは標準エラーに失敗を出力して終わる。
 
 書き出すファイルには、パスワードを含む接続文字列が入る。`.gitignore` に加えて、コミットしないようにする。
 
