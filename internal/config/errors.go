@@ -1,6 +1,7 @@
 package config
 
 import (
+	"context"
 	"errors"
 	"regexp"
 )
@@ -32,6 +33,24 @@ type Error struct {
 	Message string `json:"message"`
 	Hint    string `json:"hint,omitempty"`
 	Cause   error  `json:"-"`
+}
+
+type ErrorResponse struct {
+	Error *Error `json:"error"`
+}
+
+func NewErrorResponse(err error) ErrorResponse {
+	problem, ok := errors.AsType[*Error](err)
+	if !ok {
+		problem = NewError(Internal, "could not complete the operation", "")
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			problem = NewError(Canceled, "operation canceled", "")
+		}
+	}
+	safe := *problem
+	safe.Message = RedactConnectionDetails(safe.Message)
+	safe.Hint = RedactConnectionDetails(safe.Hint)
+	return ErrorResponse{Error: &safe}
 }
 
 var connectionURL = regexp.MustCompile(`(?i)\x60postgres(?:ql)?://[^\x60\r\n]*\x60|'postgres(?:ql)?://[^'\r\n]*'|"postgres(?:ql)?://[^"\r\n]*"|postgres(?:ql)?://[^[:space:]'"<>\x60]*`)

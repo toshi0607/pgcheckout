@@ -1,6 +1,7 @@
 package gitx
 
 import (
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -30,6 +31,26 @@ func (o EnvOptions) Validate() error {
 type EnvResult struct {
 	EnvFile        string `json:"env_file"`
 	EnvFileChanged bool   `json:"env_file_changed"`
+}
+
+func (o EnvOptions) WriteBranch(cwd, fullURL, database string, created bool) (EnvResult, error) {
+	result, err := o.Write(cwd, fullURL)
+	if err == nil {
+		return result, nil
+	}
+	status := "already exists"
+	if created {
+		status = "was created"
+	}
+	hint := fmt.Sprintf("The branch database %q %s.", database, status)
+	if problem, ok := errors.AsType[*config.Error](err); ok {
+		if problem.Hint != "" {
+			hint += " " + problem.Hint
+		}
+		return result, &config.Error{Code: problem.Code, Message: problem.Message, Hint: hint, Cause: err}
+	}
+	hint += fmt.Sprintf(" Check the path and permissions for %q.", *o.Path)
+	return result, &config.Error{Code: config.Internal, Message: "could not write env file", Hint: hint, Cause: err}
 }
 
 func (o EnvOptions) Write(cwd, url string) (EnvResult, error) {

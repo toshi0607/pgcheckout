@@ -8,11 +8,14 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"strconv"
+	"syscall"
 
 	"github.com/toshi0607/pgcheckout/internal/branch"
 	"github.com/toshi0607/pgcheckout/internal/config"
 	"github.com/toshi0607/pgcheckout/internal/gitx"
+	"github.com/toshi0607/pgcheckout/internal/mcpserver"
 	"github.com/toshi0607/pgcheckout/internal/naming"
 )
 
@@ -32,6 +35,15 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer, version s
 	}
 	if options.command == "version" {
 		if err := writeResult(stdout, format, map[string]string{"version": version}); err != nil {
+			return writeError(stderr, format, err)
+		}
+		return 0
+	}
+	if options.command == "mcp" {
+		ctx, stop := signal.NotifyContext(ctx, syscall.SIGTERM)
+		defer stop()
+		server := mcpserver.Server{Version: version, Overrides: options.overrides, Refill: startMCPRefill}
+		if err := server.RunStdio(ctx, os.Stdin, stdout); err != nil {
 			return writeError(stderr, format, err)
 		}
 		return 0
@@ -93,7 +105,7 @@ func (a arguments) prepareEnsureResult(cwd string, cfg config.Config, ensured br
 	var env gitx.EnvResult
 	if a.env.Path != nil {
 		var err error
-		env, err = writeEnsureEnv(cwd, a.env, ensured)
+		env, err = a.env.WriteBranch(cwd, ensured.URL, ensured.Database, ensured.Created)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -116,40 +128,25 @@ func (a arguments) prepareEnsureResult(cwd string, cfg config.Config, ensured br
 	}{ensured, env}, refill, nil
 }
 
-func writeEnsureEnv(cwd string, opts gitx.EnvOptions, ensured branch.EnsureResult) (gitx.EnvResult, error) {
-	result, err := opts.Write(cwd, ensured.URL)
-	if err == nil {
-		return result, nil
-	}
-	status := "already exists"
-	if ensured.Created {
-		status = "was created"
-	}
-	hint := fmt.Sprintf("The branch database %q %s.", ensured.Database, status)
-	if problem, ok := errors.AsType[*config.Error](err); ok {
-		if problem.Hint != "" {
-			hint += " " + problem.Hint
-		}
-		return result, &config.Error{Code: problem.Code, Message: problem.Message, Hint: hint, Cause: err}
-	}
-	hint += fmt.Sprintf(" Check the path and permissions for %q.", *opts.Path)
-	return result, &config.Error{Code: config.Internal, Message: "could not write env file", Hint: hint, Cause: err}
-}
-
 func (a arguments) validateConfig(cfg config.Config) error {
-	if cfg.AdminURL == nil {
-		return config.NewError(config.ConfigMissing, "admin URL is required", "Set PGCHECKOUT_ADMIN_URL or pass --admin-url.")
-	}
-	if a.command == "base" && (a.sub == "create" || a.sub == "adopt") {
+	if cfg.AdminURL != nil && a.command == "base" && (a.sub == "create" || a.sub == "adopt") {
 		return naming.ValidateBase(a.pos[0])
 	}
-	if cfg.Base == "" {
-		if a.command == "doctor" {
-			return nil
-		}
-		return config.NewError(config.ConfigMissing, "base name is required", "Set PGCHECKOUT_BASE or pass --base.")
+	return branch.ValidateConfig(cfg, a.command != "doctor")
+}
+
+func startMCPRefill(cfg config.Config) (bool, string) {
+	refill, err := prepareRefill(cfg)
+	if err != nil {
+		return false, "could not prepare a detached pool refill"
 	}
-	return naming.ValidateBase(cfg.Base)
+	if err := refill.Start(); err != nil {
+		return true, "could not start detached pool refill"
+	}
+	if err := refill.Process.Release(); err != nil {
+		return true, "could not release detached pool refill process"
+	}
+	return true, ""
 }
 
 func (a arguments) execute(ctx context.Context, cwd string, svc branch.Service) (any, error) {

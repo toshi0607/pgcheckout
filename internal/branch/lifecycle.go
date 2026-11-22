@@ -64,7 +64,7 @@ func (svc Service) Drop(ctx context.Context, branch string, force bool) (DropRes
 }
 
 func (svc Service) Reset(ctx context.Context, branch string, force bool, opts EnsureOptions) (EnsureResult, error) {
-	if err := validateTTL(opts.TTL); err != nil {
+	if err := ValidateTTL(opts.TTL); err != nil {
 		return EnsureResult{}, err
 	}
 	name, err := branchDatabase(svc.Config.Base, branch)

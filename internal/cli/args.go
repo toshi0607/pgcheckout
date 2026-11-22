@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/toshi0607/pgcheckout/internal/branch"
 	"github.com/toshi0607/pgcheckout/internal/config"
 	"github.com/toshi0607/pgcheckout/internal/gitx"
 )
@@ -41,8 +42,11 @@ func parse(args []string) (options arguments, format string, err error) {
 		return options, *output, usage("invalid global flags")
 	}
 	format = *output
-	if format != "json" && format != "text" {
+	if format != "json" && format != "text" && (len(rest) == 0 || rest[0] != "mcp") {
 		return options, format, usage("--format must be json or text")
+	}
+	if len(rest) > 0 && rest[0] == "mcp" {
+		format = "json"
 	}
 	global.Visit(func(f *flag.Flag) {
 		switch f.Name {
@@ -162,7 +166,7 @@ func (a *arguments) bind(local *flag.FlagSet) error {
 		default:
 			return usage("unknown base subcommand")
 		}
-	case "list", "dsn", "doctor", "version":
+	case "list", "dsn", "doctor", "version", "mcp":
 	default:
 		return usage("unknown command")
 	}
@@ -201,8 +205,8 @@ func (a *arguments) validate() error {
 	if a.size != nil && *a.size < 0 {
 		return usage("--size must be non-negative")
 	}
-	if a.ttl != nil && *a.ttl <= 0 {
-		return usage("--ttl must be greater than zero")
+	if err := branch.ValidateTTL(a.ttl); err != nil {
+		return err
 	}
 	return a.env.Validate()
 }

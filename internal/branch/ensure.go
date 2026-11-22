@@ -36,7 +36,7 @@ type EnsureResult struct {
 }
 
 func (svc Service) Ensure(ctx context.Context, branch string, opts EnsureOptions) (EnsureResult, error) {
-	if err := validateTTL(opts.TTL); err != nil {
+	if err := ValidateTTL(opts.TTL); err != nil {
 		return EnsureResult{}, err
 	}
 	name, err := branchDatabase(svc.Config.Base, branch)
@@ -264,7 +264,7 @@ func branchDatabase(base, branch string) (string, error) {
 	return naming.BranchDB(base, branch)
 }
 
-func validateTTL(ttl *time.Duration) error {
+func ValidateTTL(ttl *time.Duration) error {
 	if ttl != nil && *ttl <= 0 {
 		return config.NewError(config.Usage, "--ttl must be greater than zero", "")
 	}

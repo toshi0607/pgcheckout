@@ -62,3 +62,22 @@ pgcheckout drop feat/x
 - Do not run `DROP DATABASE` yourself on databases named `<base>__...`. Use `pgcheckout drop`, `pgcheckout gc` or `pgcheckout pool drain`.
 - Do not connect to the base database. To change it: `pgcheckout base open`, apply the change, `pgcheckout base close`.
 - The `url` field contains the password from the admin URL. Do not log it.
+
+## MCP server
+
+Start the stdio server with `pgcheckout mcp`.
+
+| Tool | Operation |
+|---|---|
+| `doctor` | Check PostgreSQL, the role, and the base. |
+| `list` | List the base, branches, pool, temporary copies, and unmanaged databases. |
+| `pool_status` | Inspect pooled copies and readiness. |
+| `dsn` | Get an existing branch database's connection URL. |
+| `ensure` | Get or create a branch database idempotently. |
+| `reset` | Delete and recreate a named branch database. |
+| `drop` | Delete a named branch database. |
+| `gc` | Delete expired and obsolete databases, with a dry-run option. |
+
+- Tool results remove passwords from `url` and report `password_redacted`. Use `env_file` with `ensure` or `reset` to write the full URL to a managed file.
+- `reset` and `drop` require an explicit `branch`. `ensure` and `dsn` default to the server's current Git branch and return the resolved name.
+- Failures, including missing or invalid configuration, return `isError: true` with the CLI error JSON in a text block. The server stays available for further calls.

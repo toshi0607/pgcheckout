@@ -17,6 +17,7 @@ import (
 	"github.com/toshi0607/pgcheckout/internal/marker"
 	"github.com/toshi0607/pgcheckout/internal/naming"
 	"github.com/toshi0607/pgcheckout/internal/pg"
+	"github.com/toshi0607/pgcheckout/internal/testpg"
 )
 
 type fixture struct {
@@ -50,18 +51,8 @@ func newFixture(t *testing.T, prepare func(*testing.T, *fixture)) *fixture {
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		dbs, err := pg.Databases(ctx, f.admin)
-		if err != nil {
-			t.Errorf("list test databases for cleanup: %v", err)
-			return
-		}
-		for _, d := range dbs {
-			if d.Name != f.source && d.Name != base && !naming.IsReservedName(base, d.Name) {
-				continue
-			}
-			if _, err := f.admin.Exec(ctx, "DROP DATABASE IF EXISTS "+pg.Identifier(d.Name)); err != nil {
-				t.Errorf("clean up test database %s: %v", d.Name, err)
-			}
+		if err := testpg.CleanupDatabases(ctx, f.admin, base, f.source); err != nil {
+			t.Error(err)
 		}
 		if f.role != "" {
 			if _, err := f.admin.Exec(ctx, "DROP ROLE "+pg.Identifier(f.role)); err != nil {

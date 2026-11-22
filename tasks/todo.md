@@ -18,6 +18,8 @@
   - 証跡: AlloyDB Omni 17.10 で 3 回連続 exit 0。`TestDropInUseNeedsForce` は `-count=10` で exit 0
 - [x] S5 レビュー（`reviewer` に DESIGN.md との照合を依頼）と指摘の反映
 - [x] S6 README と AGENTS.md（エージェント向けの使い方）
+- [ ] S7 MCP サーバー（`pgcheckout mcp`、標準入出力、ツール 8 つ）
+  - 完了条件: `go build ./... && go vet ./... && go vet -tags integration ./... && go test ./...` が exit 0。SDK のクライアントから全ツールを呼ぶ結合テストが PostgreSQL 18 と AlloyDB Omni 17 で exit 0。`initialize` と `server/discover` の両方の手順で `tools/list` が 8 件を返す。約 1 GB のベースで `ensure` の複製中に標準入力を閉じても、目印の無いデータベースが残らない
 
 ## 再開するときの続き（2026-11-22 に中断）
 
@@ -38,7 +40,7 @@
 |------------|--------|-----------|
 | 対象は PostgreSQL 互換だけ。MySQL は扱わない | user msg（2026-11-22） | DESIGN.md「対象にしないもの」 |
 | ローカル（PostgreSQL、AlloyDB Omni）を最初の対象にする | user msg | S1、S4 の結合テスト |
-| db-branch と実装が同じである必要はない。保守しやすく、速く、エージェントが使いやすいこと | user msg | 依存が pgx だけ、JSON 既定、冪等な ensure、対話なし |
+| db-branch と実装が同じである必要はない。保守しやすく、速く、エージェントが使いやすいこと | user msg | 依存は pgx と MCP の公式 SDK、JSON 既定、冪等な ensure、対話なし |
 | 破壊的な SQL は目印のあるデータベースだけに実行する | advisor / DESIGN.md | 結合テスト `TestDropRefusesUnmanaged` など |
 | リポジトリはローカルのまま。GitHub への作成とプッシュはトシの OK が要る | rules（外へ出す操作） | `git remote -v` が空 |
 | 「GCP」と書かず Google Cloud と書く | memory | grep |
@@ -55,9 +57,14 @@
 | 保護したベースの複製、複製で落ちる 3 項目、名前変更とコメントの原子性は AlloyDB Omni 17 でも同じ | VERIFIED | Omni 17.10 で同じ探りを CREATEDB だけのロールで実行（2026-11-22）。`file_copy_method` は 17 に無く、`unrecognized configuration parameter` になる |
 | マネージドの AlloyDB で `clone` が速い | UNVERIFIED-ACCEPTED（2026-11-22） | 実クラスタは課金が要るので未計測。方式は自動選択で、遅くても動作は変わらない。トシに報告済み |
 | AlloyDB Omni の Docker イメージに PostgreSQL 18 は無い | VERIFIED | Docker Hub のタグ一覧（最新は 17.10、2026-11-22 時点） |
+| MCP の公式 Go SDK v1.8.0 は、標準入出力で `initialize` と `server/discover` の両方に応える | VERIFIED | 2026-11-23 の試作: 両方の手順で `tools/call` が `structuredContent` を返した |
+| 標準入力が閉じたとき、SDK は実行中のツールの文脈を中断する | UNVERIFIED-ACCEPTED | 2026-11-23。SDK の挙動に頼らず、サーバー側で文脈を中断して実行中のツールを待つ実装にする。S7 の実機確認で確かめる |
 
 ## 判断の記録
 
+- 2026-11-23 MCP サーバーは公式の Go SDK v1.8.0 で作る。MCP は 2026-07-28 版で `initialize` を廃止しており、新旧の手順を自前で追うより SDK に任せるほうが保守しやすい。依存が pgx だけではなくなる。
+- 2026-11-23 MCP の結果にはパスワードを含めない。ツールの結果は会話の記録に残るためである。CLI の出力は従来どおりパスワードを含む。
+- 2026-11-23 MCP のツールにベースの操作、`pool drain`、`pool fill`、`hook` を入れない。ほかの利用者に影響する操作と、エージェントが呼ぶ必要の薄い操作である。
 - 2026-11-22 名前は仮に `pgtwig` とした。GitHub のリポジトリ検索で同名が無かった。
 - 2026-11-22 トシの決定で名前を `pgcheckout` に変えた。`pgbranch` など branch を含む素直な名前は既存のリポジトリと重なる。エージェントが打つ前提なので、短さより意味の伝わりやすさを取った。
 - 2026-11-22 S1 と S2 を 1 回の委譲にまとめた。プールは `ensure` の流れに組み込まれており、分けると `ensure` を書き直すことになるため。結合テストはまとめて実行した。

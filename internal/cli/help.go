@@ -60,6 +60,7 @@ var help = helpResult{
 		{"pool drain", "Drop pool and temporary databases.", nil, ""},
 		{"gc", "Remove expired branch databases and obsolete copies.", []helpFlag{{"--dry-run", "", "Show what would be dropped."}}, ""},
 		{"doctor", "Report server, role and base status.", nil, ""},
+		{"mcp", "Run an MCP server on stdio.", nil, ""},
 		{"base", "Manage the base database.", nil, "<create|adopt|open|close>"},
 		{"base create", "Copy a source database to make a base.", []helpFlag{
 			{"--from", "database", "Copy this source database (required)."}, terminateFlag,

@@ -1,9 +1,7 @@
 package cli
 
 import (
-	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -36,26 +34,14 @@ func writeResult(out io.Writer, format string, value any) error {
 }
 
 func writeError(out io.Writer, format string, err error) int {
-	problem, ok := errors.AsType[*config.Error](err)
-	if !ok {
-		problem = config.NewError(config.Internal, "could not complete the operation", "")
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			problem = config.NewError(config.Canceled, "operation canceled", "")
-		}
-	}
-	safe := *problem
-	safe.Message = config.RedactConnectionDetails(safe.Message)
-	safe.Hint = config.RedactConnectionDetails(safe.Hint)
-	problem = &safe
+	payload := config.NewErrorResponse(err)
+	problem := payload.Error
 	if format == "text" {
 		fmt.Fprintln(out, "error:", problem.Message)
 		if problem.Hint != "" {
 			fmt.Fprintln(out, "hint:", problem.Hint)
 		}
 	} else {
-		payload := struct {
-			Error *config.Error `json:"error"`
-		}{Error: problem}
 		json.NewEncoder(out).Encode(payload)
 	}
 	if problem.Code == config.Usage {

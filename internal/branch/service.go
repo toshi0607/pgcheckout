@@ -24,6 +24,19 @@ type Service struct {
 	Connect func(context.Context, string) (*pgx.Conn, error)
 }
 
+func ValidateConfig(cfg config.Config, requireBase bool) error {
+	if cfg.AdminURL == nil {
+		return config.NewError(config.ConfigMissing, "admin URL is required", "Set PGCHECKOUT_ADMIN_URL or pass --admin-url.")
+	}
+	if cfg.Base == "" {
+		if !requireBase {
+			return nil
+		}
+		return config.NewError(config.ConfigMissing, "base name is required", "Set PGCHECKOUT_BASE or pass --base.")
+	}
+	return naming.ValidateBase(cfg.Base)
+}
+
 type session struct {
 	*pgx.Conn
 	config.Config
