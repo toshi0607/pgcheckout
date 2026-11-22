@@ -42,11 +42,8 @@ func parse(args []string) (options arguments, format string, err error) {
 		return options, *output, usage("invalid global flags")
 	}
 	format = *output
-	if format != "json" && format != "text" && (len(rest) == 0 || rest[0] != "mcp") {
+	if format != "json" && format != "text" {
 		return options, format, usage("--format must be json or text")
-	}
-	if len(rest) > 0 && rest[0] == "mcp" {
-		format = "json"
 	}
 	global.Visit(func(f *flag.Flag) {
 		switch f.Name {

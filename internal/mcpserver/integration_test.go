@@ -5,6 +5,7 @@ package mcpserver
 import (
 	"context"
 	"encoding/json"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -22,7 +23,9 @@ import (
 	"github.com/toshi0607/pgcheckout/internal/testpg"
 )
 
-func mcpFixture(t *testing.T) (*mcp.ClientSession, *pgx.Conn, config.Config, string) {
+const fixturePassword = "pgcheckout-mcp-fixture-secret"
+
+func mcpFixture(t *testing.T, withPassword bool) (*mcp.ClientSession, *pgx.Conn, config.Config, string) {
 	t.Helper()
 	raw := os.Getenv("PGCHECKOUT_TEST_ADMIN_URL")
 	if raw == "" {
@@ -60,6 +63,11 @@ func mcpFixture(t *testing.T) (*mcp.ClientSession, *pgx.Conn, config.Config, str
 	svc := branch.Service{Config: cfg}
 	if _, err := svc.BaseCreate(t.Context(), base, source, false); err != nil {
 		t.Fatal("create test base:", err)
+	}
+	if password, _ := adminURL.User.Password(); withPassword && password == "" && adminURL.Query().Get("password") == "" {
+		// Trust authentication accepts a fixture password so the MCP response must redact it.
+		adminURL.User = url.UserPassword(adminURL.User.Username(), fixturePassword)
+		raw = adminURL.String()
 	}
 	cwd := t.TempDir()
 	client := startClient(t, Server{
@@ -100,7 +108,7 @@ func expectEmptyArrays(t *testing.T, result map[string]any, fields ...string) {
 }
 
 func TestMCPAllTools(t *testing.T) {
-	client, _, cfg, cwd := mcpFixture(t)
+	client, _, cfg, cwd := mcpFixture(t, true)
 	expectEmptyArrays(t, successfulTool(t, client, "doctor", nil), "problems", "unmanaged")
 	expectEmptyArrays(t, successfulTool(t, client, "list", nil), "branches", "pool", "tmp", "unmanaged")
 	expectEmptyArrays(t, successfulTool(t, client, "pool_status", nil), "databases")
@@ -131,17 +139,40 @@ func TestMCPAllTools(t *testing.T) {
 	if reset["created"] != true || reset["reset"] != true || reset["database"] != db {
 		t.Fatal("reset did not recreate the database")
 	}
-	_, wantRedacted := cfg.AdminURL.User.Password()
-	for key := range cfg.AdminURL.Query() {
-		wantRedacted = wantRedacted || passwordParameter(key)
-	}
 	wantURL, _, err := redactURL(cfg.DatabaseURL(db))
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, result := range []map[string]any{first, second, dsn, withEnv, reset} {
-		if result["branch"] != "topic" || result["url"] != wantURL || result["password_redacted"] != wantRedacted {
+		actualURL, ok := result["url"].(string)
+		if !ok || result["branch"] != "topic" || actualURL != wantURL || result["password_redacted"] != true {
 			t.Fatal("unexpected branch name, connection URL, or redaction flag")
+		}
+		redacted, err := url.Parse(actualURL)
+		if err != nil {
+			t.Fatal("could not parse the redacted URL")
+		}
+		if _, hasPassword := redacted.User.Password(); hasPassword {
+			t.Fatal("MCP URL contained a password")
+		}
+		for key := range redacted.Query() {
+			if passwordParameter(key) {
+				t.Fatal("MCP URL contained a password query parameter")
+			}
+		}
+		data, err := json.Marshal(result)
+		if err != nil {
+			t.Fatal("could not encode the MCP result")
+		}
+		if strings.Contains(string(data), fixturePassword) {
+			t.Fatal("MCP result contained the fixture password")
+		}
+		if warnings, ok := result["warnings"].([]any); ok {
+			for _, warning := range warnings {
+				if message, ok := warning.(string); ok && redactDiagnostic(cfg, message) != message {
+					t.Fatal("MCP warning contained connection details")
+				}
+			}
 		}
 	}
 
@@ -158,7 +189,7 @@ func TestMCPAllTools(t *testing.T) {
 }
 
 func TestMCPToolErrors(t *testing.T) {
-	client, admin, cfg, _ := mcpFixture(t)
+	client, admin, cfg, _ := mcpFixture(t, false)
 	args := map[string]any{"branch": "topic"}
 	expectToolError(t, callTool(t, client, "dsn", args), config.BranchNotFound)
 	name, err := naming.BranchDB(cfg.Base, "topic")

@@ -3,6 +3,7 @@ package mcpserver
 import (
 	"context"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -54,6 +55,15 @@ type ensureOutput struct {
 	EnvFileChanged   *bool  `json:"env_file_changed,omitempty"`
 }
 
+type branchOperations interface {
+	DSN(context.Context, string) (branch.DSNResult, error)
+	Ensure(context.Context, string, branch.EnsureOptions) (branch.EnsureResult, error)
+}
+
+const envKeySyntax = `[A-Za-z_][A-Za-z0-9_]*`
+
+var envKeyPattern = regexp.MustCompile("^" + envKeySyntax + "$")
+
 func (c toolCall) doctor(ctx context.Context, _ emptyInput) (branch.DoctorResult, error) {
 	result, err := c.svc.Doctor(ctx)
 	result.Unmanaged = nonNil(result.Unmanaged)
@@ -87,7 +97,7 @@ func (c toolCall) dsn(ctx context.Context, in currentBranchInput) (dsnOutput, er
 	if err != nil {
 		return dsnOutput{}, err
 	}
-	result, err := c.svc.DSN(ctx, name)
+	result, err := c.branches.DSN(ctx, name)
 	if err != nil {
 		return dsnOutput{}, err
 	}
@@ -105,7 +115,7 @@ func (c toolCall) ensure(ctx context.Context, in ensureInput) (ensureOutput, err
 	if err != nil {
 		return ensureOutput{}, err
 	}
-	result, err := c.svc.Ensure(ctx, name, opts)
+	result, err := c.branches.Ensure(ctx, name, opts)
 	if err != nil {
 		return ensureOutput{}, err
 	}
@@ -175,15 +185,22 @@ func (in ensureSettings) options() (opts branch.EnsureOptions, env gitx.EnvOptio
 	if in.TTL != nil {
 		ttl, err := time.ParseDuration(*in.TTL)
 		if err != nil {
-			return opts, env, config.NewError(config.Usage, "invalid command flags", "")
+			return opts, env, config.NewError(config.Usage, `ttl must be a duration such as "72h"`, "")
 		}
-		opts.TTL = &ttl
+		if ttl <= 0 {
+			return opts, env, config.NewError(config.Usage, "ttl must be greater than zero", "")
+		}
+		opts.TTL = new(ttl)
 	}
-	if err := branch.ValidateTTL(opts.TTL); err != nil {
-		return opts, env, err
+	switch {
+	case in.EnvKey != nil && in.EnvFile == nil:
+		return opts, env, config.NewError(config.Usage, "env_key requires env_file", "")
+	case in.EnvFile != nil && *in.EnvFile == "":
+		return opts, env, config.NewError(config.Usage, "env_file must not be empty", "")
+	case in.EnvKey != nil && !envKeyPattern.MatchString(*in.EnvKey):
+		return opts, env, config.NewError(config.Usage, "env_key must match "+envKeySyntax, "")
 	}
-	env = gitx.EnvOptions{Path: in.EnvFile, Key: in.EnvKey}
-	return opts, env, env.Validate()
+	return opts, gitx.EnvOptions{Path: in.EnvFile, Key: in.EnvKey}, nil
 }
 
 func nonNil[T any](items []T) []T {

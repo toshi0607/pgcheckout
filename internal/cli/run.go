@@ -40,11 +40,12 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer, version s
 		return 0
 	}
 	if options.command == "mcp" {
+		ignoreSIGPIPE()
 		ctx, stop := signal.NotifyContext(ctx, syscall.SIGTERM)
 		defer stop()
 		server := mcpserver.Server{Version: version, Overrides: options.overrides, Refill: startMCPRefill}
 		if err := server.RunStdio(ctx, os.Stdin, stdout); err != nil {
-			return writeError(stderr, format, err)
+			return writeError(stderr, "json", err)
 		}
 		return 0
 	}
@@ -143,9 +144,10 @@ func startMCPRefill(cfg config.Config) (bool, string) {
 	if err := refill.Start(); err != nil {
 		return true, "could not start detached pool refill"
 	}
-	if err := refill.Process.Release(); err != nil {
-		return true, "could not release detached pool refill process"
-	}
+	go func() {
+		// Wait only to reap the child because the tool reports whether it started.
+		_ = refill.Wait()
+	}()
 	return true, ""
 }
 

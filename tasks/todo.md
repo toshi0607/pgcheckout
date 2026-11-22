@@ -18,8 +18,9 @@
   - 証跡: AlloyDB Omni 17.10 で 3 回連続 exit 0。`TestDropInUseNeedsForce` は `-count=10` で exit 0
 - [x] S5 レビュー（`reviewer` に DESIGN.md との照合を依頼）と指摘の反映
 - [x] S6 README と AGENTS.md（エージェント向けの使い方）
-- [ ] S7 MCP サーバー（`pgcheckout mcp`、標準入出力、ツール 8 つ）
+- [x] S7 MCP サーバー（`pgcheckout mcp`、標準入出力、ツール 8 つ）
   - 完了条件: `go build ./... && go vet ./... && go vet -tags integration ./... && go test ./...` が exit 0。SDK のクライアントから全ツールを呼ぶ結合テストが PostgreSQL 18 と AlloyDB Omni 17 で exit 0。`initialize` と `server/discover` の両方の手順で `tools/list` が 8 件を返す。約 1 GB のベースで `ensure` の複製中に標準入力を閉じても、目印の無いデータベースが残らない
+  - 証跡（2026-11-23）: 4 つのコマンドが exit 0。`go test -race ./internal/mcpserver` も exit 0。`internal/branch` と `internal/mcpserver` の結合テストが PostgreSQL 18.7 と AlloyDB Omni 17.10 で exit 0。実バイナリで、`initialize` と `server/discover` の両方の手順が 8 件を返した。約 1 GB のベース（`wal_log`）で `ensure` の複製中に標準入力を閉じると exit 0 で終わり、`tmp` は残らなかった。`notifications/cancelled` は `canceled` のツールの失敗を返し、サーバーは次の呼び出しに応えた。パスワード付きの接続先を渡しても、標準出力にパスワードは現れなかった
 
 ## 再開するときの続き（2026-11-22 に中断）
 
@@ -58,7 +59,7 @@
 | マネージドの AlloyDB で `clone` が速い | UNVERIFIED-ACCEPTED（2026-11-22） | 実クラスタは課金が要るので未計測。方式は自動選択で、遅くても動作は変わらない。トシに報告済み |
 | AlloyDB Omni の Docker イメージに PostgreSQL 18 は無い | VERIFIED | Docker Hub のタグ一覧（最新は 17.10、2026-11-22 時点） |
 | MCP の公式 Go SDK v1.8.0 は、標準入出力で `initialize` と `server/discover` の両方に応える | VERIFIED | 2026-11-23 の試作: 両方の手順で `tools/call` が `structuredContent` を返した |
-| 標準入力が閉じたとき、SDK は実行中のツールの文脈を中断する | UNVERIFIED-ACCEPTED | 2026-11-23。SDK の挙動に頼らず、サーバー側で文脈を中断して実行中のツールを待つ実装にする。S7 の実機確認で確かめる |
+| 標準入力が閉じたとき、実行中のツールは中断され、後始末を待ってから終了する | VERIFIED | 2026-11-23 の実機確認: 複製中に標準入力を閉じて exit 0、`tmp` は残らず。サーバー側でも文脈を中断して待つ |
 
 ## 判断の記録
 
@@ -129,3 +130,17 @@ r1〜r11 の修正そのものは、`reviewer` の再レビューを受けてい
 - PostgreSQL 18.7 で `CREATE DATABASE` を実行中のバックエンドを SIGSTOP で止めてから `ensure` に SIGINT を送った。5 秒後に `canceled` で終わり、エラーに `tmp` の名前と手動で削除する案内が出た。バックエンドを再開したあと、`tmp` は残らなかった
 - AlloyDB Omni 17.10 で結合テストを `-count=5` で実行し、exit 0 だった
 - r1（目印の書き込みの再試行）と、サーバーが `CREATE DATABASE` を完了させたあとに目印を付け直す経路は、再現できていない
+
+2026-11-23、MCP サーバー（コミット 18d0683）を `reviewer` がレビューした。重大な指摘は無い。パスワードの扱い、標準出力に余計な出力が混ざらないこと、既存のコマンドの挙動が変わっていないことは成り立つとの評価だった。
+
+| 指摘 | 対応 |
+|---|---|
+| c1 補充の子プロセスが、サーバーの終了までゾンビとして残る | 起動後に `Wait` で回収する。実機で、補充の完了後に子プロセスが残らないことを確かめた |
+| c2 出力先が閉じると SIGPIPE でプロセスが終わり、後始末が飛ぶ | `mcp` では SIGPIPE を無視する。実機で、複製中に出力先を閉じても `tmp` が残らないことを確かめた（ブランチは作成された） |
+| c3 引数の型違いが JSON-RPC のエラーになり、モデルに理由が見えない | `usage` のツールの失敗にし、検証のメッセージを含める |
+| c4 エラーの文言が CLI のフラグ名になっている | `ttl`、`env_file`、`env_key` は引数名で返す |
+| c6 `mcp` だけ `--format` の検査を通らない | ほかのコマンドと同じ検査にした |
+
+反映しなかった指摘: c5（パスワードが短い語や一般的な語のとき、メッセージ中の同じ語も伏せ字になる。漏れる向きの不具合ではない）、c7（結果の符号化の前に補充が始まる。失敗は理論上だけ）。
+
+c1〜c6 の修正そのものは、`reviewer` の再レビューを受けていない。実際の MCP クライアントへの登録は試していない。

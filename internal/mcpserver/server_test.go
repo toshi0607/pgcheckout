@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -163,17 +164,9 @@ func TestToolErrors(t *testing.T) {
 	}
 	expectToolError(t, callTool(t, client, "ensure", map[string]any{"branch": ""}), config.Usage)
 
-	for _, params := range []*mcp.CallToolParams{
-		{Name: "unknown"},
-		{Name: "doctor", Arguments: map[string]any{"extra": true}},
-		{Name: "drop", Arguments: map[string]any{"branch": 1}},
-		{Name: "reset", Arguments: map[string]any{"branch": nil}},
-		{Name: "ensure", Arguments: []string{"bad"}},
-	} {
-		_, err := client.CallTool(t.Context(), params)
-		if rpcErr, ok := errors.AsType[*jsonrpc.Error](err); !ok || rpcErr.Code != jsonrpc.CodeInvalidParams {
-			t.Errorf("%s RPC error = %v, want invalid params", params.Name, err)
-		}
+	_, err := client.CallTool(t.Context(), &mcp.CallToolParams{Name: "unknown"})
+	if rpcErr, ok := errors.AsType[*jsonrpc.Error](err); !ok || rpcErr.Code != jsonrpc.CodeInvalidParams {
+		t.Errorf("unknown tool RPC error = %v, want invalid params", err)
 	}
 	t.Setenv("PGCHECKOUT_ADMIN_URL", "invalid")
 	expectToolError(t, callTool(t, client, "doctor", nil), config.ConfigInvalid)
@@ -183,11 +176,110 @@ func TestToolErrors(t *testing.T) {
 	if strings.Contains(problem.Message, password) || strings.Contains(problem.Message, adminURL) {
 		t.Error("connection diagnostic exposed credentials")
 	}
-	expectToolError(t, callTool(t, client, "ensure", map[string]any{"ttl": "0s"}), config.Usage)
-	expectToolError(t, callTool(t, client, "reset", map[string]any{"branch": "topic", "env_key": "KEY"}), config.Usage)
 	expectToolError(t, callTool(t, client, "dsn", nil), config.NotGitRepo)
 	if _, err := client.ListTools(t.Context(), nil); err != nil {
 		t.Fatal("server stopped after tool errors:", err)
+	}
+}
+
+func TestMalformedToolArguments(t *testing.T) {
+	client := startClient(t, Server{cwd: t.TempDir()})
+	for _, tc := range []struct {
+		name, tool, args, diagnostic string
+	}{
+		{"wrong type", "drop", `{"force":"true"}`, `has type "string", want "boolean"`},
+		{"unknown property", "doctor", `{"extra":true}`, `unexpected additional properties ["extra"]`},
+		{"null property", "reset", `{"branch":null}`, `has type "null", want "string"`},
+		{"null arguments", "ensure", `null`, `has type "null", want "object"`},
+		{"non-object", "ensure", `["bad"]`, `has type "array", want "object"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+			result, err := client.CallTool(ctx, &mcp.CallToolParams{Name: tc.tool, Arguments: json.RawMessage(tc.args)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			problem := expectToolError(t, result, config.Usage)
+			if !strings.HasPrefix(problem.Message, "invalid arguments: ") ||
+				!strings.Contains(problem.Message, tc.diagnostic) || problem.Hint != "Check the tool's input schema." {
+				t.Errorf("unexpected tool error: %+v", problem)
+			}
+		})
+	}
+}
+
+func TestEnsureSettingsErrors(t *testing.T) {
+	client := startClient(t, Server{cwd: t.TempDir(), Overrides: config.Overrides{
+		AdminURL: new("postgres://user@localhost/postgres"), Base: new("app"), PoolSize: new("0"), Strategy: new("auto"),
+	}, connect: func(context.Context, string) (*pgx.Conn, error) {
+		return nil, errors.New("unexpected connection attempt")
+	}})
+	for _, tc := range []struct {
+		name string
+		args map[string]any
+		want string
+	}{
+		{"bad ttl", map[string]any{"ttl": "bad"}, `ttl must be a duration such as "72h"`},
+		{"zero ttl", map[string]any{"ttl": "0s"}, "ttl must be greater than zero"},
+		{"negative ttl", map[string]any{"ttl": "-1s"}, "ttl must be greater than zero"},
+		{"missing env_file", map[string]any{"env_key": "KEY"}, "env_key requires env_file"},
+		{"empty env_file", map[string]any{"env_file": ""}, "env_file must not be empty"},
+		{"invalid env_key", map[string]any{"env_file": "branch.env", "env_key": "bad-name"}, "env_key must match [A-Za-z_][A-Za-z0-9_]*"},
+	} {
+		tc.args["branch"] = "topic"
+		for _, tool := range []string{"ensure", "reset"} {
+			t.Run(tool+"/"+tc.name, func(t *testing.T) {
+				problem := expectToolError(t, callTool(t, client, tool, tc.args), config.Usage)
+				if problem.Message != tc.want {
+					t.Errorf("message = %q, want %q", problem.Message, tc.want)
+				}
+			})
+		}
+	}
+}
+
+type branchServiceStub func(tool, name string) branch.DSNResult
+
+func (s branchServiceStub) DSN(_ context.Context, name string) (branch.DSNResult, error) {
+	return s("dsn", name), nil
+}
+
+func (s branchServiceStub) Ensure(_ context.Context, name string, _ branch.EnsureOptions) (branch.EnsureResult, error) {
+	return branch.EnsureResult{DSNResult: s("ensure", name)}, nil
+}
+
+func TestDefaultBranch(t *testing.T) {
+	cwd := t.TempDir()
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	t.Setenv("GIT_CONFIG_SYSTEM", os.DevNull)
+	for _, args := range [][]string{{"init", "--template="}, {"symbolic-ref", "HEAD", "refs/heads/feat/x"}} {
+		cmd := exec.CommandContext(t.Context(), "git", args...)
+		cmd.Dir = cwd
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+
+	for _, tool := range []string{"ensure", "dsn"} {
+		t.Run(tool, func(t *testing.T) {
+			client := startClient(t, Server{cwd: cwd, Overrides: config.Overrides{
+				AdminURL: new("postgres://user@localhost/postgres"), Base: new("app"), PoolSize: new("0"), Strategy: new("auto"),
+			}, branches: branchServiceStub(func(operation, name string) branch.DSNResult {
+				if operation != tool || name != "feat/x" {
+					t.Errorf("service operation %s(%q), want %s(%q)", operation, name, tool, "feat/x")
+				}
+				return branch.DSNResult{Branch: name, Database: "app__feat_x", URL: "postgres://user@localhost/app__feat_x"}
+			})})
+			result := callTool(t, client, tool, nil)
+			if result.IsError {
+				t.Fatal(textContent(t, result))
+			}
+			fields, ok := result.StructuredContent.(map[string]any)
+			if !ok || fields["branch"] != "feat/x" {
+				t.Fatalf("unexpected structured result: %v", result.StructuredContent)
+			}
+		})
 	}
 }
 
@@ -283,15 +375,20 @@ func TestHandlerCancellation(t *testing.T) {
 			done := make(chan error, 1)
 			var clientTransport mcp.Transport
 			stop := cancelServer
-			if mode == "EOF" {
+			if mode != "request" {
 				stdin, clientOutput := io.Pipe()
 				clientInput, stdout := io.Pipe()
-				defer clientInput.Close()
-				defer clientOutput.Close()
+				defer func() {
+					if err := errors.Join(clientInput.Close(), clientOutput.Close()); err != nil {
+						t.Error("close client pipes:", err)
+					}
+				}()
 				clientTransport = &mcp.IOTransport{Reader: clientInput, Writer: clientOutput}
-				stop = func() {
-					if err := clientOutput.Close(); err != nil {
-						t.Error("close server stdin:", err)
+				if mode == "EOF" {
+					stop = func() {
+						if err := clientOutput.Close(); err != nil {
+							t.Error("close server stdin:", err)
+						}
 					}
 				}
 				go func() { done <- server.RunStdio(ctx, stdin, stdout) }()
@@ -303,8 +400,10 @@ func TestHandlerCancellation(t *testing.T) {
 			client := connectClient(t, clientTransport)
 			callCtx, cancelCall := context.WithCancel(t.Context())
 			defer cancelCall()
+			callSucceeded := make(chan bool, 1)
 			go func() {
-				_, _ = client.CallTool(callCtx, &mcp.CallToolParams{Name: "doctor"})
+				result, err := client.CallTool(callCtx, &mcp.CallToolParams{Name: "doctor"})
+				callSucceeded <- err == nil && !result.IsError
 			}()
 			select {
 			case <-started:
@@ -337,6 +436,15 @@ func TestHandlerCancellation(t *testing.T) {
 				}
 			}
 			waitServer(t, done)
+			cancelCall()
+			select {
+			case succeeded := <-callSucceeded:
+				if succeeded {
+					t.Error("canceled tool call succeeded")
+				}
+			case <-time.After(5 * time.Second):
+				t.Error("canceled tool call did not return")
+			}
 		})
 	}
 }

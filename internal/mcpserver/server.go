@@ -19,8 +19,9 @@ type Server struct {
 	Overrides config.Overrides
 	Refill    func(config.Config) (requested bool, warning string)
 
-	cwd     string
-	connect func(context.Context, string) (*pgx.Conn, error)
+	cwd      string
+	connect  func(context.Context, string) (*pgx.Conn, error)
+	branches branchOperations
 }
 
 func (s Server) RunStdio(ctx context.Context, stdin io.ReadCloser, stdout io.Writer) error {

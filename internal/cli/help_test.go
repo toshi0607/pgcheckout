@@ -15,7 +15,7 @@ import (
 )
 
 func TestHelp(t *testing.T) {
-	for _, args := range [][]string{{"help"}, {"--help"}, {"-h"}, {"ensure", "--help"}, {"pool", "fill", "--help"}, {"base", "--help"}} {
+	for _, args := range [][]string{{"help"}, {"--help"}, {"-h"}, {"ensure", "--help"}, {"pool", "fill", "--help"}, {"base", "--help"}, {"mcp", "--help"}} {
 		var stdout, stderr bytes.Buffer
 		if code := Run(t.Context(), args, &stdout, &stderr, "dev"); code != 0 || stderr.Len() != 0 {
 			t.Fatalf("Run(%v) = %d, stderr %q", args, code, &stderr)
@@ -40,6 +40,22 @@ func TestHelp(t *testing.T) {
 		}) {
 			t.Error("ensure help is missing --ttl <duration>")
 		}
+	}
+}
+
+func TestMCPFormat(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	args := []string{"--format", "bogus", "mcp"}
+	if code := Run(t.Context(), args, &stdout, &stderr, "dev"); code != 2 || stdout.Len() != 0 ||
+		!strings.Contains(stderr.String(), `"code":"usage","message":"--format must be json or text"`) {
+		t.Fatalf("Run(%v) = (%d, %q, %q)", args, code, &stdout, &stderr)
+	}
+
+	stderr.Reset()
+	args = []string{"--format", "text", "mcp", "--help"}
+	if code := Run(t.Context(), args, &stdout, &stderr, "dev"); code != 0 || stderr.Len() != 0 ||
+		!strings.HasPrefix(stdout.String(), "Usage: pgcheckout [global flags] mcp\n") {
+		t.Fatalf("Run(%v) = (%d, %q, %q)", args, code, &stdout, &stderr)
 	}
 }
 

@@ -1,6 +1,7 @@
 package mcpserver
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -49,9 +50,10 @@ func (s Server) registerTools(sdk *mcp.Server, lifetime *toolsLifetime) {
 }
 
 type toolCall struct {
-	cwd    string
-	svc    branch.Service
-	refill func(config.Config) (bool, string)
+	cwd      string
+	svc      branch.Service
+	branches branchOperations
+	refill   func(config.Config) (bool, string)
 }
 
 func addTool[In, Out any](r *registration, name, title, description string, annotations mcp.ToolAnnotations,
@@ -63,8 +65,7 @@ func addTool[In, Out any](r *registration, name, title, description string, anno
 			prop.Type, prop.Types = prop.Types[1], nil
 		}
 	}
-	// Advertise required fields and check their presence separately so callers
-	// get pgcheckout's usage result for omissions and JSON-RPC errors for bad types.
+	// Check required branch names separately to provide a branch-specific hint.
 	wireInput := *input
 	wireInput.Required = nil
 	inputValidator := resolveSchema(&wireInput)
@@ -90,12 +91,18 @@ func addTool[In, Out any](r *registration, name, title, description string, anno
 		if len(args) == 0 {
 			args = json.RawMessage("{}")
 		}
-		var fields map[string]any
-		var in In
-		if err := json.Unmarshal(args, &fields); err != nil || fields == nil ||
-			inputValidator.Validate(fields) != nil || json.Unmarshal(args, &in) != nil {
-			return nil, &jsonrpc.Error{Code: jsonrpc.CodeInvalidParams, Message: "invalid tool arguments"}
+		var decoded any
+		if err := json.Unmarshal(args, &decoded); err != nil {
+			return invalidArguments(err)
 		}
+		if err := inputValidator.Validate(decoded); err != nil {
+			return invalidArguments(err)
+		}
+		var in In
+		if err := json.Unmarshal(args, &in); err != nil {
+			return invalidArguments(err)
+		}
+		fields := decoded.(map[string]any) // The input schema requires an object.
 		if fields["branch"] == "" || (fields["branch"] == nil && slices.Contains(input.Required, "branch")) {
 			return toolError(config.Config{}, config.NewError(config.Usage, "branch name is required", "Pass a branch name explicitly."))
 		}
@@ -115,7 +122,8 @@ func addTool[In, Out any](r *registration, name, title, description string, anno
 		if err := branch.ValidateConfig(cfg, name != "doctor"); err != nil {
 			return toolError(cfg, err)
 		}
-		call := toolCall{cwd: cwd, svc: branch.Service{Config: cfg, Connect: server.connect}, refill: server.Refill}
+		svc := branch.Service{Config: cfg, Connect: server.connect}
+		call := toolCall{cwd: cwd, svc: svc, branches: cmp.Or[branchOperations](server.branches, svc), refill: server.Refill}
 		out, err := run(call, ctx, in)
 		if err != nil {
 			return toolError(cfg, err)
@@ -133,6 +141,11 @@ func addTool[In, Out any](r *registration, name, title, description string, anno
 			Content:           []mcp.Content{&mcp.TextContent{Text: string(data)}},
 		}, nil
 	})
+}
+
+func invalidArguments(err error) (*mcp.CallToolResult, error) {
+	return toolError(config.Config{}, config.NewError(config.Usage,
+		"invalid arguments: "+err.Error(), "Check the tool's input schema."))
 }
 
 func inferSchema[T any]() *jsonschema.Schema {
