@@ -109,9 +109,41 @@ pgcheckout base close
 | `doctor` | サーバー、権限、ベースの状態を報告する |
 | `base create` / `base adopt` / `base open` / `base close` | ベースの作成と更新 |
 | `hook install` / `hook uninstall` | post-checkout フック |
+| `mcp` | 標準入出力で MCP のサーバーとして動く |
 | `help` | コマンド、フラグ、環境変数の一覧を JSON で返す |
 
 ブランチ名を省くと、git の現在のブランチ名を使う。
+
+## MCP サーバーとして使う
+
+`pgcheckout mcp` は、標準入出力で MCP のサーバーとして動く。
+MCP のクライアントには、コマンドを `pgcheckout`、引数を `mcp` として登録する。接続先とベースの名前は、環境変数で渡す。
+
+```json
+{
+  "mcpServers": {
+    "pgcheckout": {
+      "command": "pgcheckout",
+      "args": ["mcp"],
+      "env": {
+        "PGCHECKOUT_ADMIN_URL": "postgres://dev@127.0.0.1:5432/postgres",
+        "PGCHECKOUT_BASE": "app"
+      }
+    }
+  }
+}
+```
+
+ツールは `doctor`、`list`、`pool_status`、`dsn`、`ensure`、`reset`、`drop`、`gc` の 8 つである。
+ベースの操作、`pool fill`、`pool drain`、フックの操作は、ツールにしていない。
+
+コマンドとして実行する場合との違いは、次の 3 つである。
+
+- 結果の `url` にはパスワードを含めない。ツールの結果は会話の記録に残るためである。パスワードを含む接続先は、`ensure` と `reset` の `env_file` でファイルへ書き出す。
+- `reset` と `drop` には、ブランチ名を必ず渡す。`ensure` と `dsn` はブランチ名を省略でき、その場合はサーバーの作業ディレクトリの現在のブランチを使う。
+- 失敗は、`isError` を立てたツールの結果として返す。本文はコマンドの場合と同じ `{"error":{"code","message","hint"}}` である。
+
+`initialize` で始める従来の手順と、2026-07-28 版の `server/discover` の手順の両方に応える。
 
 ## 設定
 
