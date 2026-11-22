@@ -135,7 +135,13 @@ func (s *session) ensureOnce(ctx context.Context, name, branch string, opts Ensu
 			return nil
 		}
 		m := branchMarker(copied.database.Marker, branch, opts.TTL)
-		if err := s.renameManaged(ctx, copied.database, name, m); err != nil {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		transition, cancel := cleanupContext(ctx)
+		err = s.renameManaged(transition, copied.database, name, m)
+		cancel()
+		if err != nil {
 			if databaseGone(err) {
 				retry = true
 				return nil
@@ -179,7 +185,12 @@ func (s *session) claimPool(ctx context.Context, gen int, name, branch string, o
 			continue
 		}
 		m := branchMarker(d.Marker, branch, opts.TTL)
-		err := s.renameManaged(ctx, d, name, m)
+		if err := ctx.Err(); err != nil {
+			return EnsureResult{}, err
+		}
+		transition, cancel := cleanupContext(ctx)
+		err := s.renameManaged(transition, d, name, m)
+		cancel()
 		if databaseGone(err) || pg.State(err) == "55006" {
 			continue
 		}

@@ -28,6 +28,7 @@ type session struct {
 	*pgx.Conn
 	config.Config
 	pg.Server
+	connect func(context.Context, string) (*pgx.Conn, error)
 }
 
 func run[T any](ctx context.Context, svc Service, fn func(*session) (T, error)) (result T, err error) {
@@ -49,28 +50,58 @@ func run[T any](ctx context.Context, svc Service, fn func(*session) (T, error)) 
 			Message: "could not connect to PostgreSQL: " + message, Cause: err}
 	}
 	defer func() {
-		cleanup, cancel := cleanupContext(ctx)
-		defer cancel()
-		if closeErr := conn.Close(cleanup); closeErr != nil {
-			err = errors.Join(err, fmt.Errorf("close maintenance connection: %w", closeErr))
-		}
-		err = databaseError(err, "")
+		err = databaseError(closeMaintenance(ctx, conn, err), "")
 	}()
-	if err := pg.Exec(ctx, conn, "use PostgreSQL catalog schema", "SET search_path = pg_catalog"); err != nil {
-		return result, err
-	}
-	server, err := pg.ServerInfo(ctx, conn)
+	server, err := prepareMaintenance(ctx, conn, svc.Config.MaintenanceDB())
 	if err != nil {
 		return result, err
 	}
-	if server.Maintenance != svc.Config.MaintenanceDB() {
-		return result, config.NewError(config.ConfigInvalid, "connected database differs from the admin URL path", "")
+	return fn(&session{Conn: conn, Config: svc.Config, Server: server, connect: connect})
+}
+
+func prepareMaintenance(ctx context.Context, conn *pgx.Conn, database string) (pg.Server, error) {
+	if err := pg.Exec(ctx, conn, "use PostgreSQL catalog schema", "SET search_path = pg_catalog"); err != nil {
+		return pg.Server{}, err
+	}
+	server, err := pg.ServerInfo(ctx, conn)
+	if err != nil {
+		return pg.Server{}, err
+	}
+	if server.Maintenance != database {
+		return pg.Server{}, config.NewError(config.ConfigInvalid, "connected database differs from the admin URL path", "")
 	}
 	// SQL literals below use standard escaping regardless of the role's session defaults.
 	if err := pg.Exec(ctx, conn, "enable standard SQL strings", "SET standard_conforming_strings = on"); err != nil {
-		return result, err
+		return pg.Server{}, err
 	}
-	return fn(&session{Conn: conn, Config: svc.Config, Server: server})
+	return server, nil
+}
+
+func closeMaintenance(ctx context.Context, conn *pgx.Conn, err error) error {
+	cleanup, cancel := cleanupContext(ctx)
+	defer cancel()
+	// Closing a finished session cannot change a successful operation.
+	if closeErr := conn.Close(cleanup); closeErr != nil && err != nil {
+		return errors.Join(err, fmt.Errorf("close maintenance connection: %w", closeErr))
+	}
+	return err
+}
+
+func (s *session) withCleanupConn(ctx context.Context, fn func(*pgx.Conn) error) (err error) {
+	if !s.Conn.IsClosed() {
+		return fn(s.Conn)
+	}
+	adminURL := s.AdminURL.String()
+	conn, err := s.connect(ctx, adminURL)
+	if err != nil {
+		message := config.RedactConnectionDetails(strings.ReplaceAll(err.Error(), adminURL, "<redacted-url>"))
+		return &config.Error{Code: config.ConnectFailed, Message: "reconnect to PostgreSQL for cleanup: " + message, Cause: err}
+	}
+	defer func() { err = closeMaintenance(ctx, conn, err) }()
+	if _, err := prepareMaintenance(ctx, conn, s.Maintenance); err != nil {
+		return err
+	}
+	return fn(conn)
 }
 
 func connectMaintenance(ctx context.Context, url string) (*pgx.Conn, error) {

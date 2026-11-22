@@ -28,8 +28,17 @@ func (db mutationDB) Scan(dest ...any) error {
 	*dest[2].(*string) = db.database.Owner
 	*dest[3].(*bool) = db.database.HasACL
 	*dest[4].(*bool) = db.database.AllowConnections
-	*dest[5].(*string) = db.comment
+	*dest[5].(**string) = new(db.comment)
 	return nil
+}
+
+func TestDropInUseHint(t *testing.T) {
+	if got := dropInUseHint(false); got != "Use --force to disconnect database sessions." {
+		t.Errorf("unforced drop hint = %q", got)
+	}
+	if got := dropInUseHint(true); got != "Sessions kept reconnecting; retry, or stop the clients first." {
+		t.Errorf("forced drop hint = %q", got)
+	}
 }
 
 func TestCheckMutationComparesWarnings(t *testing.T) {

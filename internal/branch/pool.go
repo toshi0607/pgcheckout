@@ -125,7 +125,13 @@ func (s *session) fillOne(ctx context.Context, result *FillResult, strategy stri
 		m := copied.database.Marker
 		m.Kind = marker.Pool
 		m.Warnings = len(copied.warnings)
-		if err := s.renameManaged(ctx, copied.database, name, m); err != nil {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		transition, cancel := cleanupContext(ctx)
+		err = s.renameManaged(transition, copied.database, name, m)
+		cancel()
+		if err != nil {
 			if databaseGone(err) {
 				return nil
 			}

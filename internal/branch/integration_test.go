@@ -658,6 +658,75 @@ func TestBaseAdoptIdempotent(t *testing.T) {
 	}
 }
 
+func TestAdoptFailureRestoresDatabase(t *testing.T) {
+	f := newFixture(t, nil)
+	name := f.source
+	execTestSQL(t, f.admin, "COMMENT ON DATABASE "+pg.Identifier(name)+" IS 'original'")
+	held := connectTestDB(t, f.svc.Config.DatabaseURL(name))
+	svc := f.svc
+	svc.Config.Base = name
+	if _, err := svc.BaseAdopt(t.Context(), name, false); config.ErrorCode(err) != config.DatabaseInUse {
+		t.Fatalf("adopt with an active session = %v, want database_in_use", err)
+	}
+	d := f.database(t, name)
+	if d.Comment == nil || *d.Comment != "original" || !d.AllowConnections || d.Marker.PGCheckout != 0 {
+		t.Fatalf("failed adopt changed database state: %+v", d)
+	}
+	if err := held.Ping(t.Context()); err != nil {
+		t.Fatalf("failed adopt disconnected the active session: %v", err)
+	}
+	if _, err := svc.List(t.Context()); config.ErrorCode(err) != config.BaseNotMarked {
+		t.Fatalf("list after failed adopt = %v, want base_not_marked", err)
+	}
+	doctor, err := svc.Doctor(t.Context())
+	if err != nil || doctor.Base != nil || !slices.ContainsFunc(doctor.Problems, func(problem config.Error) bool {
+		return problem.Code == config.BaseNotMarked
+	}) {
+		t.Fatalf("doctor after failed adopt: %+v, %v", doctor, err)
+	}
+	adopted, err := svc.BaseAdopt(t.Context(), name, true)
+	if err != nil || !adopted.Changed || adopted.Open || adopted.AllowConnections || adopted.Gen != 1 {
+		t.Fatalf("adopt with termination: %+v, %v", adopted, err)
+	}
+	d = f.database(t, name)
+	if d.AllowConnections || d.Marker.Kind != marker.Base || !d.Marker.ValidFor(name) || d.Marker.IsOpen() || d.Marker.Gen != 1 {
+		t.Fatalf("adopt did not leave a closed generation-1 base: %+v", d)
+	}
+}
+
+func TestAdoptFailureRestoresNullComment(t *testing.T) {
+	f := newFixture(t, nil)
+	name := f.source
+	connectTestDB(t, f.svc.Config.DatabaseURL(name))
+	if _, err := f.svc.BaseAdopt(t.Context(), name, false); config.ErrorCode(err) != config.DatabaseInUse {
+		t.Fatalf("adopt with an active session = %v, want database_in_use", err)
+	}
+	d := f.database(t, name)
+	if d.Comment != nil || !d.AllowConnections || d.Marker.PGCheckout != 0 {
+		t.Fatalf("failed adopt did not restore NULL comment and allow connections: %+v", d)
+	}
+}
+
+func TestCreateBaseCanceledLeavesNoBase(t *testing.T) {
+	newFixture(t, func(t *testing.T, f *fixture) {
+		name := f.svc.Config.Base
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		if _, err := f.svc.BaseCreate(ctx, name, f.source, false); config.ErrorCode(err) != config.Canceled {
+			t.Fatalf("canceled create = %v, want canceled", err)
+		}
+		dbs, err := pg.Databases(t.Context(), f.admin)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, d := range dbs {
+			if d.Name == name || (strings.HasPrefix(d.Name, name+"__tmp_") && !d.Marker.ValidFor(name)) {
+				t.Errorf("canceled create left database %q", d.Name)
+			}
+		}
+	})
+}
+
 func TestPoolClaimReportsReplicationWarnings(t *testing.T) {
 	f := newFixture(t, nil)
 	execTestSQL(t, f.admin, "ALTER DATABASE "+pg.Identifier(f.svc.Config.Base)+` SET search_path TO "schema/with/slashes"`)

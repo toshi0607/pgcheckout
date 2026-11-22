@@ -33,11 +33,19 @@ func Comment(ctx context.Context, db DB, name string, m marker.Marker) error {
 	if err != nil {
 		return fmt.Errorf("encode database marker: %w", err)
 	}
-	literal, err := quoteLiteral(string(encoded))
-	if err != nil {
-		return fmt.Errorf("quote database marker: %w", err)
+	return SetComment(ctx, db, name, new(string(encoded)))
+}
+
+func SetComment(ctx context.Context, db DB, name string, comment *string) error {
+	literal := "NULL"
+	if comment != nil {
+		var err error
+		literal, err = quoteLiteral(*comment)
+		if err != nil {
+			return fmt.Errorf("quote database comment: %w", err)
+		}
 	}
-	return Exec(ctx, db, "write database marker", "COMMENT ON DATABASE "+Identifier(name)+" IS "+literal)
+	return Exec(ctx, db, "write database comment", "COMMENT ON DATABASE "+Identifier(name)+" IS "+literal)
 }
 
 func AllowConnections(ctx context.Context, db DB, name string, allow bool) error {

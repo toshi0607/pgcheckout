@@ -22,7 +22,7 @@ func CopyACL(ctx context.Context, db DB, source Database, target, owner string) 
 		a.privilege_type, a.grantee = 0, a.is_grantable
 		FROM pg_database AS d, aclexplode(d.datacl) AS a WHERE d.oid = $1`, source.OID)
 	if err != nil {
-		return []string{"could not read source database privileges"}, false
+		return []string{"could not read source database privileges"}, true
 	}
 	privileges, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (privilege, error) {
 		var p privilege
@@ -30,7 +30,7 @@ func CopyACL(ctx context.Context, db DB, source Database, target, owner string) 
 		return p, err
 	})
 	if err != nil {
-		return []string{"could not read source database privileges"}, false
+		return []string{"could not read source database privileges"}, true
 	}
 
 	public := make(map[string]bool)

@@ -23,11 +23,12 @@ type Database struct {
 	Owner            string
 	HasACL           bool
 	AllowConnections bool
+	Comment          *string
 	Marker           marker.Marker
 }
 
 const databaseSelect = `SELECT d.datname, d.oid, pg_get_userbyid(d.datdba), d.datacl IS NOT NULL,
-	d.datallowconn, coalesce(shobj_description(d.oid, 'pg_database'), '')
+	d.datallowconn, shobj_description(d.oid, 'pg_database')
 	FROM pg_database AS d`
 
 func Lookup(ctx context.Context, db DB, name string) (Database, bool, error) {
@@ -57,9 +58,10 @@ func Databases(ctx context.Context, db DB) ([]Database, error) {
 
 func scanDatabase(row pgx.Row) (Database, error) {
 	var d Database
-	var comment string
-	err := row.Scan(&d.Name, &d.OID, &d.Owner, &d.HasACL, &d.AllowConnections, &comment)
-	d.Marker, _ = marker.Parse(comment)
+	err := row.Scan(&d.Name, &d.OID, &d.Owner, &d.HasACL, &d.AllowConnections, &d.Comment)
+	if d.Comment != nil {
+		d.Marker, _ = marker.Parse(*d.Comment)
+	}
 	return d, err
 }
 

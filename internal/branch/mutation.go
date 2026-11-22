@@ -82,13 +82,11 @@ func (s *session) dropManaged(ctx context.Context, expected pg.Database, force b
 			return checkErr
 		}
 
-		hint := ""
 		if err == nil {
 			err = pg.Exec(ctx, s.Conn, "drop database", sql)
-			hint = "Use --force to disconnect database sessions."
 		}
 		if !force || attempt == maxAttempts || !retryableForcedDrop(err) {
-			err = databaseError(err, hint)
+			err = databaseError(err, dropInUseHint(force))
 			if force {
 				if problem, ok := errors.AsType[*config.Error](err); ok && problem.Code == config.InsufficientPrivilege {
 					problem.Hint = "A session owned by another role is connected and this role may not terminate it. Retry, or disconnect that session."
@@ -103,6 +101,13 @@ func (s *session) dropManaged(ctx context.Context, expected pg.Database, force b
 		case <-time.After(300 * time.Millisecond):
 		}
 	}
+}
+
+func dropInUseHint(force bool) string {
+	if force {
+		return "Sessions kept reconnecting; retry, or stop the clients first."
+	}
+	return "Use --force to disconnect database sessions."
 }
 
 func retryableForcedDrop(err error) bool {
@@ -125,18 +130,18 @@ func (s *session) renameManaged(ctx context.Context, from pg.Database, target st
 		if err := pg.Rename(ctx, tx, from.Name, target); err != nil {
 			return err
 		}
-		if err := pg.Comment(ctx, tx, target, m); err != nil {
-			return err
-		}
-		if m.Kind == marker.Base {
-			return pg.AllowConnections(ctx, tx, target, false)
-		}
-		return nil
+		return pg.Comment(ctx, tx, target, m)
 	})
 }
 
 func (s *session) writeBase(ctx context.Context, base pg.Database, m marker.Marker, allow *bool, adopt bool) error {
-	err := pgx.BeginFunc(ctx, s.Conn, func(tx pgx.Tx) error {
+	return s.mutateBase(ctx, s.Conn, base, allow, adopt, func(tx pgx.Tx) error {
+		return pg.Comment(ctx, tx, base.Name, m)
+	})
+}
+
+func (s *session) mutateBase(ctx context.Context, conn *pgx.Conn, base pg.Database, allow *bool, adopt bool, writeComment func(pgx.Tx) error) error {
+	err := pgx.BeginFunc(ctx, conn, func(tx pgx.Tx) error {
 		if err := s.checkMutation(ctx, tx, base, adopt, marker.Base); err != nil {
 			return err
 		}
@@ -145,7 +150,7 @@ func (s *session) writeBase(ctx context.Context, base pg.Database, m marker.Mark
 				return err
 			}
 		}
-		return pg.Comment(ctx, tx, base.Name, m)
+		return writeComment(tx)
 	})
 	return databaseError(err, "")
 }
@@ -153,10 +158,14 @@ func (s *session) writeBase(ctx context.Context, base pg.Database, m marker.Mark
 func (s *session) discardCopy(ctx context.Context, d pg.Database, cause error) error {
 	cleanup, cancel := cleanupContext(ctx)
 	defer cancel()
-	err := s.dropManaged(cleanup, d, false)
+	err := s.withCleanupConn(cleanup, func(conn *pgx.Conn) error {
+		cleaner := *s
+		cleaner.Conn = conn
+		return cleaner.dropManaged(cleanup, d, false)
+	})
 	if err != nil && !errors.Is(err, errDatabaseGone) && pg.State(err) != "3D000" {
 		cleanupErr := fmt.Errorf("clean up temporary database %q: %w", d.Name, err)
-		if problem, ok := errors.AsType[*config.Error](cause); ok {
+		if problem, ok := errors.AsType[*config.Error](databaseError(cause, "")); ok {
 			return &config.Error{Code: problem.Code, Hint: problem.Hint,
 				Message: config.RedactConnectionDetails(problem.Message + "; " + cleanupErr.Error()),
 				Cause:   errors.Join(cause, cleanupErr)}

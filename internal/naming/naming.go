@@ -20,6 +20,9 @@ func ValidateBase(base string) error {
 	if strings.Contains(base, "__") {
 		return config.NewError(config.ConfigInvalid, "invalid base name", "base names must not contain a double underscore")
 	}
+	if strings.HasSuffix(base, "_") {
+		return config.NewError(config.ConfigInvalid, "invalid base name", "base names must not end with an underscore")
+	}
 	if !basePattern.MatchString(base) {
 		return config.NewError(config.ConfigInvalid, "base name must match ^[a-z_][a-z0-9_]{0,39}$", "")
 	}

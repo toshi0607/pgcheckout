@@ -1,12 +1,24 @@
 package naming
 
 import (
+	"errors"
 	"regexp"
 	"strings"
 	"testing"
 
 	"github.com/toshi0607/pgcheckout/internal/config"
 )
+
+func TestBaseNameTrailingUnderscoreRejected(t *testing.T) {
+	err := ValidateBase("a_")
+	problem, ok := errors.AsType[*config.Error](err)
+	if !ok || problem.Code != config.ConfigInvalid || problem.Hint != "base names must not end with an underscore" {
+		t.Fatalf("ValidateBase(%q) = %#v", "a_", err)
+	}
+	if err := ValidateBase("a_b"); err != nil {
+		t.Fatalf("ValidateBase(%q) = %v", "a_b", err)
+	}
+}
 
 func TestSlug(t *testing.T) {
 	for _, tc := range []struct {
