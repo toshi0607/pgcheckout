@@ -3,8 +3,6 @@
 pgcheckout は、PostgreSQL 互換のサーバーの中で開発用のデータベースを複製し、git のブランチごとに 1 つずつ割り当てる CLI である。
 複製を先に作っておき、要求が来たら名前を付け替えて渡すので、ブランチ用のデータベースは数十ミリ秒で手に入る。
 
-名前は仮のものである。
-
 ## 動作する環境
 
 接続文字列で届く PostgreSQL 互換のサーバーで動く。
@@ -25,10 +23,10 @@ PostgreSQL 18.7 と AlloyDB Omni 17.10 で結合テストを実行している�
 
 ## 使い始める
 
-ビルドする。
+インストールする。`pgcheckout` が `PATH` に入る。
 
 ```bash
-go build -o bin/pgcheckout ./cmd/pgcheckout
+go install ./cmd/pgcheckout
 ```
 
 管理用の接続先とベースの名前を環境変数で渡す。
@@ -74,6 +72,13 @@ pgcheckout hook install --env-file .env.pgcheckout
 `.env.pgcheckout` には `DATABASE_URL=...` の 1 行が書かれる。
 フックは、リポジトリの `.git/hooks` に置く。`core.hooksPath` が指す共有のディレクトリには書き込まない。
 
+フックが動くには、次の 2 つが要る。満たされていないとき、フックは何もせずに終わる。
+
+- `pgcheckout` が、git を実行する環境の `PATH` に在る。
+- `PGCHECKOUT_ADMIN_URL` が、git を実行する環境に設定されている。ベースの名前は `.pgcheckout.json` に書いてもよい。
+
+書き出すファイルには、パスワードを含む接続文字列が入る。`.gitignore` に加えて、コミットしないようにする。
+
 ## ベースを更新する
 
 マイグレーションなどでベースの内容を変えるときは、ベースを開いて変更し、閉じる。
@@ -104,6 +109,7 @@ pgcheckout base close
 | `doctor` | サーバー、権限、ベースの状態を報告する |
 | `base create` / `base adopt` / `base open` / `base close` | ベースの作成と更新 |
 | `hook install` / `hook uninstall` | post-checkout フック |
+| `help` | コマンド、フラグ、環境変数の一覧を JSON で返す |
 
 ブランチ名を省くと、git の現在のブランチ名を使う。
 
@@ -142,6 +148,8 @@ pgcheckout が削除するのは、データベースのコメントに pgchecko
 - ブランチ同士のマージと差分は扱わない。
 - AlloyDB Omni の Docker イメージは PostgreSQL 17 までなので、複製は容量に比例した時間がかかる。
 - マネージドの AlloyDB では計測していない。
+- 同じベースを使う全員が、同じ管理用データベースを指定する必要がある。排他のロックが管理用データベースごとに独立しているためである。
+- ベースの名前には `__` を含められない。
 - 接続先の文字列にはパスワードが含まれる。出力やファイルの扱いに注意する。
 
 ## テスト
