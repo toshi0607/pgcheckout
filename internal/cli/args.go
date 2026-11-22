@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/toshi0607/pgtwig/internal/config"
+	"github.com/toshi0607/pgtwig/internal/gitx"
 )
 
 type arguments struct {
@@ -22,6 +23,7 @@ type arguments struct {
 	terminate bool
 	noRefill  bool
 	dryRun    bool
+	env       gitx.EnvOptions
 }
 
 func parse(args []string) (options arguments, format string, err error) {
@@ -57,9 +59,7 @@ func parse(args []string) (options arguments, format string, err error) {
 	}
 	options.command, rest = rest[0], rest[1:]
 	switch options.command {
-	case "hook":
-		return options, format, usage("not implemented")
-	case "base", "pool":
+	case "base", "pool", "hook":
 		if len(rest) == 0 {
 			return options, format, usage("a subcommand is required")
 		}
@@ -89,6 +89,7 @@ func parse(args []string) (options arguments, format string, err error) {
 func (a *arguments) bind(local *flag.FlagSet) error {
 	switch a.command {
 	case "ensure", "reset":
+		a.bindEnv(local)
 		local.Func("ttl", "", func(value string) error {
 			ttl, err := time.ParseDuration(value)
 			if err != nil {
@@ -105,6 +106,15 @@ func (a *arguments) bind(local *flag.FlagSet) error {
 		local.BoolVar(&a.force, "force", false, "")
 	case "gc":
 		local.BoolVar(&a.dryRun, "dry-run", false, "")
+	case "hook":
+		switch a.sub {
+		case "install":
+			a.bindEnv(local)
+			local.BoolVar(&a.force, "force", false, "")
+		case "uninstall":
+		default:
+			return usage("unknown hook subcommand")
+		}
 	case "pool":
 		switch a.sub {
 		case "fill":
@@ -138,6 +148,17 @@ func (a *arguments) bind(local *flag.FlagSet) error {
 	return nil
 }
 
+func (a *arguments) bindEnv(local *flag.FlagSet) {
+	local.Func("env-file", "", func(value string) error {
+		a.env.Path = new(value)
+		return nil
+	})
+	local.Func("env-key", "", func(value string) error {
+		a.env.Key = new(value)
+		return nil
+	})
+}
+
 func (a *arguments) validate() error {
 	switch {
 	case a.command == "base" && (a.sub == "create" || a.sub == "adopt"):
@@ -159,7 +180,7 @@ func (a *arguments) validate() error {
 	if a.size != nil && *a.size < 0 {
 		return usage("--size must be non-negative")
 	}
-	return nil
+	return a.env.Validate()
 }
 
 func flagName(arg string) (name string, attached bool) {
@@ -184,7 +205,7 @@ func globalFlags(global *flag.FlagSet, args []string) (flags, rest []string) {
 			if !attached && len(args) > 0 {
 				flags, args = append(flags, args[0]), args[1:]
 			}
-		case name == "from" || name == "ttl" || name == "size":
+		case name == "from" || name == "ttl" || name == "size" || name == "env-file" || name == "env-key":
 			rest = append(rest, arg)
 			if !attached && len(args) > 0 {
 				rest, args = append(rest, args[0]), args[1:]
@@ -228,4 +249,23 @@ func localFlags(fs *flag.FlagSet, args []string) ([]string, error) {
 
 func usage(message string) *config.Error {
 	return config.NewError(config.Usage, message, "")
+}
+
+func (a arguments) usageHint() string {
+	switch a.command {
+	case "ensure":
+		return "pgtwig ensure [branch] [--ttl <duration>] [--no-refill] [--env-file <path> [--env-key <NAME>]]"
+	case "reset":
+		return "pgtwig reset [branch] [--force] [--ttl <duration>] [--no-refill] [--env-file <path> [--env-key <NAME>]]"
+	case "hook":
+		switch a.sub {
+		case "install":
+			return "pgtwig hook install [--env-file <path> [--env-key <NAME>]] [--force]"
+		case "uninstall":
+			return "pgtwig hook uninstall"
+		default:
+			return "pgtwig hook install | uninstall"
+		}
+	}
+	return ""
 }

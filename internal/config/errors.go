@@ -12,6 +12,7 @@ const (
 	BaseOpen              = "base_open"
 	DatabaseInUse         = "database_in_use"
 	UnmanagedDatabase     = "unmanaged_database"
+	UnmanagedFile         = "unmanaged_file"
 	BranchNotFound        = "branch_not_found"
 	NotGitRepo            = "not_git_repo"
 	DetachedHead          = "detached_head"

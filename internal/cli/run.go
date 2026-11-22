@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"bytes"
 	"cmp"
 	"context"
 	"errors"
@@ -10,16 +9,19 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
-	"strings"
 
 	"github.com/toshi0607/pgtwig/internal/branch"
 	"github.com/toshi0607/pgtwig/internal/config"
+	"github.com/toshi0607/pgtwig/internal/gitx"
 	"github.com/toshi0607/pgtwig/internal/naming"
 )
 
 func Run(ctx context.Context, args []string, stdout, stderr io.Writer, version string) int {
 	options, format, err := parse(args)
 	if err != nil {
+		if problem, ok := errors.AsType[*config.Error](err); ok && problem.Code == config.Usage && problem.Hint == "" {
+			problem.Hint = options.usageHint()
+		}
 		return writeError(stderr, format, err)
 	}
 	if options.command == "version" {
@@ -31,6 +33,16 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer, version s
 	cwd, err := os.Getwd()
 	if err != nil {
 		return writeError(stderr, format, fmt.Errorf("get working directory: %w", err))
+	}
+	if options.command == "hook" {
+		result, err := options.executeHook(ctx, cwd)
+		if err != nil {
+			return writeError(stderr, format, err)
+		}
+		if err := writeResult(stdout, format, result); err != nil {
+			return writeError(stderr, format, err)
+		}
+		return 0
 	}
 	cfg, err := config.Load(cwd, options.overrides, os.LookupEnv)
 	if err != nil {
@@ -45,13 +57,11 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer, version s
 	}
 
 	var refill *exec.Cmd
-	if ensured, ok := result.(branch.EnsureResult); ok && ensured.RefillNeeded {
-		refill, err = prepareRefill(cfg)
-		ensured.RefillStarted = refill != nil
+	if ensured, ok := result.(branch.EnsureResult); ok {
+		result, refill, err = options.prepareEnsureResult(cwd, cfg, ensured)
 		if err != nil {
-			ensured.Warnings = append(ensured.Warnings, "could not prepare a detached pool refill")
+			return writeError(stderr, format, err)
 		}
-		result = ensured
 	}
 	if err := writeResult(stdout, format, result); err != nil {
 		return writeError(stderr, format, err)
@@ -64,6 +74,60 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer, version s
 		}
 	}
 	return 0
+}
+
+func (a arguments) executeHook(ctx context.Context, cwd string) (any, error) {
+	if a.sub == "install" {
+		return gitx.InstallHook(ctx, cwd, a.env, a.force)
+	}
+	return gitx.UninstallHook(ctx, cwd)
+}
+
+func (a arguments) prepareEnsureResult(cwd string, cfg config.Config, ensured branch.EnsureResult) (any, *exec.Cmd, error) {
+	var env gitx.EnvResult
+	if a.env.Path != nil {
+		var err error
+		env, err = writeEnsureEnv(cwd, a.env, ensured)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	var refill *exec.Cmd
+	if ensured.RefillNeeded {
+		var err error
+		refill, err = prepareRefill(cfg)
+		ensured.RefillStarted = refill != nil
+		if err != nil {
+			ensured.Warnings = append(ensured.Warnings, "could not prepare a detached pool refill")
+		}
+	}
+	if a.env.Path == nil {
+		return ensured, refill, nil
+	}
+	return struct {
+		branch.EnsureResult
+		gitx.EnvResult
+	}{ensured, env}, refill, nil
+}
+
+func writeEnsureEnv(cwd string, opts gitx.EnvOptions, ensured branch.EnsureResult) (gitx.EnvResult, error) {
+	result, err := opts.Write(cwd, ensured.URL)
+	if err == nil {
+		return result, nil
+	}
+	status := "already exists"
+	if ensured.Created {
+		status = "was created"
+	}
+	hint := fmt.Sprintf("The branch database %q %s.", ensured.Database, status)
+	if problem, ok := errors.AsType[*config.Error](err); ok {
+		if problem.Hint != "" {
+			hint += " " + problem.Hint
+		}
+		return result, &config.Error{Code: problem.Code, Message: problem.Message, Hint: hint, Cause: err}
+	}
+	hint += fmt.Sprintf(" Check the path and permissions for %q.", *opts.Path)
+	return result, &config.Error{Code: config.Internal, Message: "could not write env file", Hint: hint, Cause: err}
 }
 
 func (a arguments) validateConfig(cfg config.Config) error {
@@ -138,22 +202,7 @@ func (a arguments) branchName(ctx context.Context, cwd string) (string, error) {
 	if len(a.pos) == 1 {
 		return a.pos[0], nil
 	}
-	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--abbrev-ref", "HEAD")
-	cmd.Dir = cwd
-	cmd.Env = append(cmd.Environ(), "LC_ALL=C")
-	out, err := cmd.Output()
-	if err != nil {
-		if exit, ok := errors.AsType[*exec.ExitError](err); ok && bytes.Contains(exit.Stderr, []byte("not a git repository")) {
-			return "", &config.Error{Code: config.NotGitRepo, Message: "current directory is not in a Git repository",
-				Hint: "Pass a branch name explicitly.", Cause: err}
-		}
-		return "", fmt.Errorf("resolve Git branch: %w", err)
-	}
-	name := strings.TrimRight(string(out), "\r\n")
-	if name == "HEAD" {
-		return "", config.NewError(config.DetachedHead, "Git HEAD is detached", "Pass a branch name explicitly.")
-	}
-	return name, nil
+	return gitx.BranchName(ctx, cwd)
 }
 
 func prepareRefill(cfg config.Config) (*exec.Cmd, error) {
