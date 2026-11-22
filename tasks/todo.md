@@ -19,6 +19,19 @@
 - [x] S5 レビュー（`reviewer` に DESIGN.md との照合を依頼）と指摘の反映
 - [x] S6 README と AGENTS.md（エージェント向けの使い方）
 
+## 再開するときの続き（2026-11-22 に中断）
+
+- [ ] 修正後の差分（`git diff 9517177..9367bbe -- internal/branch internal/pg internal/naming internal/marker`）を `reviewer` に再レビューさせる。削除の安全性と、ベースを閉じる処理の巻き戻しが対象。途中で止めたので結果は無い
+  - 完了条件: 指摘を Review 節に記録し、重要な指摘を反映して結合テストが両サーバーで exit 0
+- [ ] README の「フックは何もせずに終わる」を直す。`PGCHECKOUT_ADMIN_URL` が無い場合は、エラーを標準エラーに出して終わる
+- [ ] MCP サーバー（今回の範囲外）
+- [ ] GitHub への公開は、トシの OK が出てから
+
+結合テストの環境は片付けた。再開するときは、次の 2 つを用意する。
+
+- PostgreSQL 18: `/opt/homebrew/opt/postgresql@18/bin` の `initdb` と `pg_ctl` でクラスタを作り、`CREATEDB` と `CREATEROLE` を持つロールと、そのロールが所有する管理用データベースを作る。`LC_ALL=en_US.UTF-8` を付けないと起動に失敗する
+- AlloyDB Omni 17: `docker run -d -e POSTGRES_PASSWORD=... -p 127.0.0.1:54330:5432 -v <volume>:/var/lib/postgresql/data google/alloydbomni:17`。ボリュームは `/var/lib/postgresql/data` に付ける
+
 ## Constraints
 
 | Constraint | Source | Verify by |
