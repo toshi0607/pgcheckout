@@ -35,7 +35,7 @@
 | 接続を禁止したベースを複製元にでき、複製先は接続できる | VERIFIED | PG 18.7 の探り（`datallowconn` が base=f、copy=t） |
 | 複製はデータベース単位の設定、権限、コメントを写さない | VERIFIED | PG 18.7 の探り（`pg_db_role_setting`、`datacl`、`shobj_description`） |
 | 名前の変更とコメントの書き換えは 1 つのトランザクションに入る | VERIFIED | PG 18.7 の探り（commit と rollback の両方） |
-| 上の 4 点は AlloyDB Omni 17 でも成り立つ | UNVERIFIED | S4 で確かめる。設計は変わらず、成り立たない項目は Omni 向けの分岐で吸収できる |
+| 保護したベースの複製、複製で落ちる 3 項目、名前変更とコメントの原子性は AlloyDB Omni 17 でも同じ | VERIFIED | Omni 17.10 で同じ探りを CREATEDB だけのロールで実行（2026-11-22）。`file_copy_method` は 17 に無く、`unrecognized configuration parameter` になる |
 | マネージドの AlloyDB で `clone` が速い | UNVERIFIED-ACCEPTED（2026-11-22） | 実クラスタは課金が要るので未計測。方式は自動選択で、遅くても動作は変わらない。トシに報告済み |
 | AlloyDB Omni の Docker イメージに PostgreSQL 18 は無い | VERIFIED | Docker Hub のタグ一覧（最新は 17.10、2026-11-22 時点） |
 
