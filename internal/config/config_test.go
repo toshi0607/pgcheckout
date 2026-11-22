@@ -13,6 +13,9 @@ func TestLoadPrecedenceAndDiscovery(t *testing.T) {
 	if err := os.MkdirAll(nested, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Mkdir(filepath.Join(root, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	writeConfig(t, root, `{"base":"file_base","pool_size":4,"strategy":"wal_log"}`)
 	for _, tc := range []struct {
 		name     string
@@ -59,6 +62,29 @@ func TestLoadPrecedenceAndDiscovery(t *testing.T) {
 	nearest, err := Load(nested, Overrides{}, noEnv)
 	if err != nil || nearest.Base != "nearest" || nearest.PoolSize != 2 || nearest.Strategy != "auto" {
 		t.Errorf("unexpected nearest config: %+v, %v", nearest, err)
+	}
+}
+
+func TestDiscoveryStopsAtGitBoundary(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "repo")
+	nested := filepath.Join(root, "nested")
+	if err := os.MkdirAll(nested, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeConfig(t, parent, `{"base":"wrong"}`)
+	if got, err := discover(nested); err != nil || got.Base != "" {
+		t.Fatalf("discovery outside a Git repository = %+v, %v", got, err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".git"), []byte("gitdir: elsewhere\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := discover(nested); err != nil || got.Base != "" {
+		t.Fatalf("discovery with a Git boundary = %+v, %v", got, err)
+	}
+	writeConfig(t, root, `{"base":"right"}`)
+	if got, err := discover(nested); err != nil || got.Base != "right" {
+		t.Fatalf("discovery at the Git boundary = %+v, %v", got, err)
 	}
 }
 

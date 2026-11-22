@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"time"
 
@@ -20,21 +21,24 @@ type EnsureOptions struct {
 
 type EnsureResult struct {
 	DSNResult
-	Created       bool      `json:"created"`
-	Source        string    `json:"source"`
-	Stale         bool      `json:"stale"`
-	Gen           int       `json:"gen"`
-	BaseGen       int       `json:"base_gen"`
-	Strategy      string    `json:"strategy"`
-	ElapsedMS     int64     `json:"elapsed_ms"`
-	ExpiresAt     time.Time `json:"expires_at,omitzero"`
-	Warnings      []string  `json:"warnings,omitempty"`
-	RefillStarted bool      `json:"refill_started"`
-	RefillNeeded  bool      `json:"-"`
-	Reset         bool      `json:"reset,omitempty"`
+	Created         bool      `json:"created"`
+	Source          string    `json:"source"`
+	Stale           bool      `json:"stale"`
+	Gen             int       `json:"gen"`
+	BaseGen         int       `json:"base_gen"`
+	Strategy        string    `json:"strategy"`
+	ElapsedMS       int64     `json:"elapsed_ms"`
+	ExpiresAt       time.Time `json:"expires_at,omitzero"`
+	Warnings        []string  `json:"warnings,omitempty"`
+	RefillRequested bool      `json:"refill_requested"`
+	RefillNeeded    bool      `json:"-"`
+	Reset           bool      `json:"reset,omitempty"`
 }
 
 func (svc Service) Ensure(ctx context.Context, branch string, opts EnsureOptions) (EnsureResult, error) {
+	if err := validateTTL(opts.TTL); err != nil {
+		return EnsureResult{}, err
+	}
 	name, err := branchDatabase(svc.Config.Base, branch)
 	if err != nil {
 		return EnsureResult{}, err
@@ -46,6 +50,12 @@ func (svc Service) Ensure(ctx context.Context, branch string, opts EnsureOptions
 
 func (s *session) ensure(ctx context.Context, name, branch string, opts EnsureOptions) (EnsureResult, error) {
 	start := time.Now()
+	if s.Base == s.Maintenance {
+		return EnsureResult{}, maintenanceError()
+	}
+	if _, err := s.lookupBase(ctx); err != nil {
+		return EnsureResult{}, err
+	}
 	for {
 		result, retry, err := s.ensureOnce(ctx, name, branch, opts)
 		if err != nil {
@@ -62,17 +72,28 @@ func (s *session) ensureOnce(ctx context.Context, name, branch string, opts Ensu
 	var base pg.Database
 	var result EnsureResult
 	var strategy string
-	err := s.claim(ctx, func() error {
+	err := s.claim(ctx, &result.Warnings, func() error {
 		var err error
-		base, err = s.copyableBase(ctx)
+		base, err = s.lookupBase(ctx)
 		if err != nil {
 			return err
+		}
+		db, found, err := s.lookupBranch(ctx, name, branch)
+		if err != nil {
+			return err
+		}
+		if found {
+			result = s.existingResult(ctx, db, base, opts)
+			return nil
+		}
+		if baseIsOpen(base) {
+			return baseOpenError()
 		}
 		strategy, err = pg.SelectStrategy(s.VersionNum, s.Config.Strategy)
 		if err != nil {
 			return err
 		}
-		result, err = s.claimExistingOrPool(ctx, base.Marker.Gen, name, branch, opts)
+		result, err = s.claimPool(ctx, base.Marker.Gen, name, branch, opts)
 		return err
 	})
 	if err != nil || result.Source != "" {
@@ -86,10 +107,15 @@ func (s *session) ensureOnce(ctx context.Context, name, branch string, opts Ensu
 	if err != nil {
 		return EnsureResult{}, false, err
 	}
+	if copied.revokeFailed {
+		err := config.NewError(config.InsufficientPrivilege, "could not revoke default database privileges from PUBLIC", "")
+		return EnsureResult{}, false, s.discardCopy(ctx, copied.database, err)
+	}
 	published := false
 	retry := false
-	err = s.claim(ctx, func() error {
-		current, err := s.copyableBase(ctx)
+	warnings := result.Warnings
+	err = s.claim(ctx, &result.Warnings, func() error {
+		current, err := s.lookupBase(ctx)
 		if err != nil {
 			return err
 		}
@@ -98,8 +124,11 @@ func (s *session) ensureOnce(ctx context.Context, name, branch string, opts Ensu
 			return err
 		}
 		if found {
-			result = s.ensureResult(db, current.Marker.Gen, "existing")
-			return s.checkRefill(ctx, &result, opts)
+			result = s.existingResult(ctx, db, current, opts)
+			return nil
+		}
+		if baseIsOpen(current) {
+			return baseOpenError()
 		}
 		if base.OID != current.OID || base.Marker.Gen != current.Marker.Gen {
 			retry = true
@@ -116,26 +145,22 @@ func (s *session) ensureOnce(ctx context.Context, name, branch string, opts Ensu
 		published = true
 		result = s.ensureResult(pg.Database{Name: name, Marker: m}, current.Marker.Gen, "copy")
 		result.Warnings = copied.warnings
-		return s.checkRefill(ctx, &result, opts)
+		s.checkRefill(ctx, &result, opts)
+		return nil
 	})
 	if !published {
-		err = s.discardCopy(ctx, copied.database, err)
 		if result.Source == "existing" {
+			err = recordCleanup(err, s.discardCopy(ctx, copied.database, nil), &result.Warnings)
 			result.Warnings = append(copied.warnings, result.Warnings...)
+		} else {
+			err = s.discardCopy(ctx, copied.database, err)
 		}
 	}
+	result.Warnings = append(warnings, result.Warnings...)
 	return result, retry, err
 }
 
-func (s *session) claimExistingOrPool(ctx context.Context, gen int, name, branch string, opts EnsureOptions) (EnsureResult, error) {
-	db, found, err := s.lookupBranch(ctx, name, branch)
-	if err != nil {
-		return EnsureResult{}, err
-	}
-	if found {
-		result := s.ensureResult(db, gen, "existing")
-		return result, s.checkRefill(ctx, &result, opts)
-	}
+func (s *session) claimPool(ctx context.Context, gen int, name, branch string, opts EnsureOptions) (EnsureResult, error) {
 	if s.Config.PoolSize == 0 {
 		return EnsureResult{}, nil
 	}
@@ -162,7 +187,11 @@ func (s *session) claimExistingOrPool(ctx context.Context, gen int, name, branch
 			return EnsureResult{}, err
 		}
 		result := s.ensureResult(pg.Database{Name: name, Marker: m}, gen, "pool")
-		return result, s.checkRefill(ctx, &result, opts)
+		if m.Warnings > 0 {
+			result.Warnings = []string{fmt.Sprintf("%d per-database settings or grants could not be replicated from the base when this copy was made; run pgtwig doctor", m.Warnings)}
+		}
+		s.checkRefill(ctx, &result, opts)
+		return result, nil
 	}
 	return EnsureResult{}, nil
 }
@@ -185,20 +214,24 @@ func (s *session) ensureResult(db pg.Database, gen int, source string) EnsureRes
 	}
 }
 
-func (s *session) checkRefill(ctx context.Context, result *EnsureResult, opts EnsureOptions) error {
+func (s *session) existingResult(ctx context.Context, db, base pg.Database, opts EnsureOptions) EnsureResult {
+	result := s.ensureResult(db, base.Marker.Gen, "existing")
+	if !baseIsOpen(base) {
+		s.checkRefill(ctx, &result, opts)
+	}
+	return result
+}
+
+func (s *session) checkRefill(ctx context.Context, result *EnsureResult, opts EnsureOptions) {
 	if opts.NoRefill || s.Config.PoolSize == 0 {
-		return nil
+		return
 	}
 	dbs, err := s.managedDatabases(ctx)
 	if err != nil {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
 		result.Warnings = append(result.Warnings, "could not check whether the pool needs a refill")
-		return nil
+		return
 	}
 	result.RefillNeeded = countPool(dbs, result.BaseGen, s.Config.PoolSize).Ready < s.Config.PoolSize
-	return nil
 }
 
 func (s *session) lookupBranch(ctx context.Context, name, branch string) (pg.Database, bool, error) {
@@ -218,4 +251,11 @@ func branchDatabase(base, branch string) (string, error) {
 		return "", config.NewError(config.ConfigMissing, "base name is required", "Set PGTWIG_BASE or pass --base.")
 	}
 	return naming.BranchDB(base, branch)
+}
+
+func validateTTL(ttl *time.Duration) error {
+	if ttl != nil && *ttl <= 0 {
+		return config.NewError(config.Usage, "--ttl must be greater than zero", "")
+	}
+	return nil
 }

@@ -30,6 +30,7 @@ type PoolDatabase struct {
 
 type FillResult struct {
 	Created   int      `json:"created"`
+	Discarded int      `json:"discarded"`
 	PoolSize  int      `json:"pool_size"`
 	Target    int      `json:"target"`
 	Strategy  string   `json:"strategy"`
@@ -39,8 +40,9 @@ type FillResult struct {
 }
 
 type DrainResult struct {
-	Dropped []string  `json:"dropped"`
-	Skipped []Skipped `json:"skipped,omitempty"`
+	Dropped  []string  `json:"dropped"`
+	Skipped  []Skipped `json:"skipped,omitempty"`
+	Warnings []string  `json:"warnings,omitempty"`
 }
 
 func (svc Service) PoolFill(ctx context.Context, size int) (FillResult, error) {
@@ -50,7 +52,7 @@ func (svc Service) PoolFill(ctx context.Context, size int) (FillResult, error) {
 	return run(ctx, svc, func(s *session) (FillResult, error) {
 		start := time.Now()
 		result := FillResult{Target: size}
-		acquired, err := s.lock(ctx, "fill", true, func() error {
+		acquired, err := s.lock(ctx, "fill", true, &result.Warnings, func() error {
 			strategy, err := pg.SelectStrategy(s.VersionNum, s.Config.Strategy)
 			if err != nil {
 				return err
@@ -73,7 +75,7 @@ func (svc Service) PoolFill(ctx context.Context, size int) (FillResult, error) {
 
 func (s *session) fillOne(ctx context.Context, result *FillResult, strategy string) (bool, error) {
 	var base pg.Database
-	err := s.claim(ctx, func() error {
+	err := s.claim(ctx, &result.Warnings, func() error {
 		var err error
 		base, err = s.copyableBase(ctx)
 		if err != nil {
@@ -101,8 +103,18 @@ func (s *session) fillOne(ctx context.Context, result *FillResult, strategy stri
 	if err != nil {
 		return false, err
 	}
+	result.Strategy = copied.database.Marker.Strategy
+	result.Warnings = append(result.Warnings, copied.warnings...)
+	if copied.revokeFailed {
+		if err := s.discardCopy(ctx, copied.database, nil); err != nil {
+			return true, err
+		}
+		result.Discarded++
+		// Another copy of this base would repeat the failed revocation.
+		return true, nil
+	}
 	published := false
-	err = s.claim(ctx, func() error {
+	err = s.claim(ctx, &result.Warnings, func() error {
 		current, err := s.copyableBase(ctx)
 		if err != nil {
 			return err
@@ -112,6 +124,7 @@ func (s *session) fillOne(ctx context.Context, result *FillResult, strategy stri
 		}
 		m := copied.database.Marker
 		m.Kind = marker.Pool
+		m.Warnings = len(copied.warnings)
 		if err := s.renameManaged(ctx, copied.database, name, m); err != nil {
 			if databaseGone(err) {
 				return nil
@@ -122,8 +135,6 @@ func (s *session) fillOne(ctx context.Context, result *FillResult, strategy stri
 		result.Created++
 		return nil
 	})
-	result.Strategy = copied.database.Marker.Strategy
-	result.Warnings = append(result.Warnings, copied.warnings...)
 	if !published {
 		err = s.discardCopy(ctx, copied.database, err)
 	}
@@ -155,7 +166,7 @@ func (svc Service) PoolStatus(ctx context.Context) (PoolStatus, error) {
 
 func (svc Service) PoolDrain(ctx context.Context) (DrainResult, error) {
 	return run(ctx, svc, func(s *session) (result DrainResult, err error) {
-		err = s.claim(ctx, func() error {
+		err = s.claim(ctx, &result.Warnings, func() error {
 			if _, err := s.lookupBase(ctx); err != nil {
 				return err
 			}

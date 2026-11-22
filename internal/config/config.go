@@ -105,7 +105,19 @@ func discover(cwd string) (fileConfig, error) {
 	if err != nil {
 		return fileConfig{}, fmt.Errorf("resolve working directory: %w", err)
 	}
-	for {
+	root := dir
+	for candidate := dir; ; candidate = filepath.Dir(candidate) {
+		if _, err := os.Lstat(filepath.Join(candidate, ".git")); err == nil {
+			root = candidate
+			break
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return fileConfig{}, &Error{Code: ConfigInvalid, Message: "could not locate Git repository boundary", Cause: err}
+		}
+		if filepath.Dir(candidate) == candidate {
+			break
+		}
+	}
+	for ; ; dir = filepath.Dir(dir) {
 		path := filepath.Join(dir, ".pgtwig.json")
 		data, err := os.ReadFile(path)
 		switch {
@@ -114,11 +126,9 @@ func discover(cwd string) (fileConfig, error) {
 		case !errors.Is(err, os.ErrNotExist):
 			return fileConfig{}, &Error{Code: ConfigInvalid, Message: "could not read .pgtwig.json", Cause: err}
 		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
+		if dir == root {
 			return fileConfig{}, nil
 		}
-		dir = parent
 	}
 }
 

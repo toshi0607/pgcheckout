@@ -13,9 +13,10 @@ import (
 )
 
 type copyResult struct {
-	database pg.Database
-	elapsed  int64
-	warnings []string
+	database     pg.Database
+	elapsed      int64
+	warnings     []string
+	revokeFailed bool
 }
 
 func (s *session) copyFromBase(ctx context.Context, source pg.Database, gen int, strategy string) (copyResult, error) {
@@ -30,9 +31,15 @@ func (s *session) copyFromBase(ctx context.Context, source pg.Database, gen int,
 	}
 	m := marker.New(marker.Tmp, s.Base, gen)
 	m.Strategy = strategy
-	if err := pg.Comment(ctx, s.Conn, name, m); err != nil {
+	cleanup, cancel := cleanupContext(ctx)
+	err = pg.Comment(cleanup, s.Conn, name, m)
+	cancel()
+	if err != nil {
+		if problem, ok := errors.AsType[*config.Error](databaseError(err, "")); ok {
+			return copyResult{}, problem
+		}
 		return copyResult{}, &config.Error{
-			Code:    config.ErrorCode(databaseError(err, "")),
+			Code:    config.Internal,
 			Message: fmt.Sprintf("could not mark newly created temporary database %q", name),
 			Cause:   err,
 		}
@@ -49,11 +56,12 @@ func (s *session) copyFromBase(ctx context.Context, source pg.Database, gen int,
 		return copyResult{}, s.discardCopy(ctx, d, unmanaged())
 	}
 	warnings := pg.CopySettings(ctx, s.Conn, source, name)
-	warnings = append(warnings, pg.CopyACL(ctx, s.Conn, source, name, actual.Owner)...)
+	aclWarnings, revokeFailed := pg.CopyACL(ctx, s.Conn, source, name, actual.Owner)
+	warnings = append(warnings, aclWarnings...)
 	if err := ctx.Err(); err != nil {
 		return copyResult{}, s.discardCopy(ctx, actual, fmt.Errorf("copy database: %w", err))
 	}
-	return copyResult{database: actual, elapsed: time.Since(start).Milliseconds(), warnings: warnings}, nil
+	return copyResult{database: actual, elapsed: time.Since(start).Milliseconds(), warnings: warnings, revokeFailed: revokeFailed}, nil
 }
 
 func databaseGone(err error) bool {

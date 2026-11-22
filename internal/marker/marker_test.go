@@ -17,7 +17,7 @@ func TestRoundTrip(t *testing.T) {
 	}{
 		{
 			Marker{PGTwig: 1, Kind: Base, Base: "app", Gen: 1, CreatedAt: created, Open: new(false)},
-			[]string{"branch", "strategy", "expires_at"}, []string{`"open":false`},
+			[]string{"branch", "strategy", "expires_at", "warnings"}, []string{`"open":false`},
 		},
 		{
 			Marker{PGTwig: 1, Kind: Branch, Base: "app", Gen: 2, Branch: "feat/login",
@@ -25,8 +25,8 @@ func TestRoundTrip(t *testing.T) {
 			[]string{"open"}, []string{`"expires_at":"2026-11-22T07:00:00Z"`, `"branch":"feat/login"`},
 		},
 		{
-			Marker{PGTwig: 1, Kind: Pool, Base: "app", Gen: 2, CreatedAt: created, Strategy: "wal_log"},
-			[]string{"branch", "open", "expires_at"}, []string{`"strategy":"wal_log"`},
+			Marker{PGTwig: 1, Kind: Pool, Base: "app", Gen: 2, CreatedAt: created, Strategy: "wal_log", Warnings: 2},
+			[]string{"branch", "open", "expires_at"}, []string{`"strategy":"wal_log"`, `"warnings":2`},
 		},
 		{
 			Marker{PGTwig: 1, Kind: Tmp, Base: "app", Gen: 2, CreatedAt: created, Strategy: "wal_log"},

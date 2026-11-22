@@ -164,7 +164,10 @@ func backupHook(path, backup string) (err error) {
 func hookPath(ctx context.Context, cwd string) (string, error) {
 	out, err := gitOutput(ctx, cwd, "rev-parse", "--is-inside-work-tree", "--git-common-dir")
 	inside, common, _ := strings.Cut(out, "\n")
-	if notGitRepo(err) || (err == nil && strings.TrimSuffix(inside, "\r") != "true") {
+	if notGitRepo(err) {
+		return "", &config.Error{Code: config.NotGitRepo, Message: gitStderr(err), Cause: err}
+	}
+	if err == nil && strings.TrimSuffix(inside, "\r") != "true" {
 		return "", &config.Error{Code: config.NotGitRepo, Message: "current directory is not in a Git work tree", Cause: err}
 	}
 	if err != nil {

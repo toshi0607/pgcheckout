@@ -15,9 +15,10 @@ type DSNResult struct {
 }
 
 type DropResult struct {
-	Branch   string `json:"branch"`
-	Database string `json:"database"`
-	Dropped  bool   `json:"dropped"`
+	Branch   string   `json:"branch"`
+	Database string   `json:"database"`
+	Dropped  bool     `json:"dropped"`
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 func (s *session) dsnResult(db pg.Database) DSNResult {
@@ -50,23 +51,29 @@ func (svc Service) Drop(ctx context.Context, branch string, force bool) (DropRes
 		return DropResult{}, err
 	}
 	return run(ctx, svc, func(s *session) (DropResult, error) {
-		err := s.claim(ctx, func() error {
+		result := DropResult{Branch: branch, Database: name}
+		err := s.claim(ctx, &result.Warnings, func() error {
 			if _, err := s.lookupBase(ctx); err != nil {
 				return err
 			}
 			return s.dropBranch(ctx, name, branch, force)
 		})
-		return DropResult{Branch: branch, Database: name, Dropped: err == nil}, err
+		result.Dropped = err == nil
+		return result, err
 	})
 }
 
 func (svc Service) Reset(ctx context.Context, branch string, force bool, opts EnsureOptions) (EnsureResult, error) {
+	if err := validateTTL(opts.TTL); err != nil {
+		return EnsureResult{}, err
+	}
 	name, err := branchDatabase(svc.Config.Base, branch)
 	if err != nil {
 		return EnsureResult{}, err
 	}
 	return run(ctx, svc, func(s *session) (EnsureResult, error) {
-		err := s.claim(ctx, func() error {
+		var warnings []string
+		err := s.claim(ctx, &warnings, func() error {
 			if _, err := s.copyableBase(ctx); err != nil {
 				return err
 			}
@@ -83,6 +90,7 @@ func (svc Service) Reset(ctx context.Context, branch string, force bool, opts En
 			return EnsureResult{}, err
 		}
 		result, err := s.ensure(ctx, name, branch, opts)
+		result.Warnings = append(warnings, result.Warnings...)
 		result.Reset = true
 		return result, err
 	})

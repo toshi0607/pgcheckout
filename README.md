@@ -57,8 +57,11 @@ pgtwig ensure
 ```
 
 ```json
-{"branch":"feat/login","database":"app__feat_login_d668f008","url":"postgres://dev@127.0.0.1:5432/app__feat_login_d668f008","created":true,"source":"pool","stale":false,"gen":1,"base_gen":1,"strategy":"file_copy_clone","elapsed_ms":2,"refill_started":true}
+{"branch":"feat/login","database":"app__feat_login_d668f008","url":"postgres://dev@127.0.0.1:5432/app__feat_login_d668f008","created":true,"source":"pool","stale":false,"gen":1,"base_gen":1,"strategy":"file_copy_clone","elapsed_ms":2,"refill_requested":true}
 ```
+
+`refill_requested: true` の場合、pgtwig は結果を出力したあとにバックグラウンドでプールの補充プロセスを起動する。
+起動に失敗すると標準エラーに `{"warning":{"code":"refill_failed","message":"..."}}` を出力し、終了コードは 0 のままとする。
 
 ## git のブランチ切り替えに連動させる
 

@@ -39,6 +39,7 @@ pgtwig drop feat/x
 - `created`: false means the database already existed and was left untouched.
 - `stale`: true means the base has changed since this branch was created. Run `pgtwig reset` to pick up the new base; pgtwig never recreates a branch on its own.
 - `source`: `existing`, `pool` or `copy`.
+- `refill_requested`: true means pgtwig will try to start a background pool refill after printing. A failed start writes `{"warning":{"code":"refill_failed","message":"..."}}` to stderr and exits 0.
 - `warnings`: per-database settings or grants that could not be replicated from the base.
 
 ## Error codes
@@ -49,6 +50,9 @@ pgtwig drop feat/x
 | `base_not_found`, `base_not_marked` | no usable base | `pgtwig base create <name> --from <db>` |
 | `base_open` | the base is being edited | wait, or run `pgtwig base close` if you opened it |
 | `database_in_use` | sessions are connected | close them, or retry with `--force` / `--terminate` |
+| `database_exists` | the destination database already exists | choose an unused database name |
+| `server_resources` | PostgreSQL lacks resources to complete the operation | check the server message and free the required resources |
+| `canceled` | the operation was canceled | check the cancellation or timeout before retrying |
 | `unmanaged_database` | a database with that name exists but pgtwig did not create it | do not drop it; report to the user |
 | `unmanaged_file` | the env file or hook exists and pgtwig did not write it | move the file or choose another path |
 | `detached_head`, `not_git_repo` | no branch name available | pass the branch name explicitly |

@@ -22,6 +22,7 @@ type Marker struct {
 	CreatedAt time.Time `json:"created_at"`
 	ExpiresAt time.Time `json:"expires_at,omitzero"`
 	Strategy  string    `json:"strategy,omitempty"`
+	Warnings  int       `json:"warnings,omitzero"`
 	Open      *bool     `json:"open,omitempty"`
 }
 
@@ -62,7 +63,7 @@ func Parse(comment string) (Marker, bool) {
 	}{
 		{"kind", &m.Kind}, {"base", &m.Base}, {"gen", &m.Gen}, {"branch", &m.Branch},
 		{"created_at", &m.CreatedAt}, {"expires_at", &m.ExpiresAt},
-		{"strategy", &m.Strategy}, {"open", &m.Open},
+		{"strategy", &m.Strategy}, {"warnings", &m.Warnings}, {"open", &m.Open},
 	} {
 		if raw, ok := fields[field.name]; ok {
 			if err := json.Unmarshal(raw, field.target); err != nil {

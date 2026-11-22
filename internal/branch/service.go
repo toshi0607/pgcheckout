@@ -6,9 +6,12 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgconn/ctxwatch"
 
 	"github.com/toshi0607/pgtwig/internal/config"
 	"github.com/toshi0607/pgtwig/internal/marker"
@@ -33,11 +36,17 @@ func run[T any](ctx context.Context, svc Service, fn func(*session) (T, error)) 
 	}
 	connect := svc.Connect
 	if connect == nil {
-		connect = pgx.Connect
+		connect = connectMaintenance
 	}
-	conn, err := connect(ctx, svc.Config.AdminURL.String())
+	adminURL := svc.Config.AdminURL.String()
+	conn, err := connect(ctx, adminURL)
 	if err != nil {
-		return result, &config.Error{Code: config.ConnectFailed, Message: "could not connect to PostgreSQL", Cause: err}
+		if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return result, &config.Error{Code: config.Canceled, Message: "operation canceled", Cause: errors.Join(ctx.Err(), err)}
+		}
+		message := config.RedactConnectionDetails(strings.ReplaceAll(err.Error(), adminURL, "<redacted-url>"))
+		return result, &config.Error{Code: config.ConnectFailed,
+			Message: "could not connect to PostgreSQL: " + message, Cause: err}
 	}
 	defer func() {
 		cleanup, cancel := cleanupContext(ctx)
@@ -45,6 +54,7 @@ func run[T any](ctx context.Context, svc Service, fn func(*session) (T, error)) 
 		if closeErr := conn.Close(cleanup); closeErr != nil {
 			err = errors.Join(err, fmt.Errorf("close maintenance connection: %w", closeErr))
 		}
+		err = databaseError(err, "")
 	}()
 	if err := pg.Exec(ctx, conn, "use PostgreSQL catalog schema", "SET search_path = pg_catalog"); err != nil {
 		return result, err
@@ -60,8 +70,18 @@ func run[T any](ctx context.Context, svc Service, fn func(*session) (T, error)) 
 	if err := pg.Exec(ctx, conn, "enable standard SQL strings", "SET standard_conforming_strings = on"); err != nil {
 		return result, err
 	}
-	result, err = fn(&session{Conn: conn, Config: svc.Config, Server: server})
-	return result, databaseError(err, "")
+	return fn(&session{Conn: conn, Config: svc.Config, Server: server})
+}
+
+func connectMaintenance(ctx context.Context, url string) (*pgx.Conn, error) {
+	cfg, err := pgx.ParseConfig(url)
+	if err != nil {
+		return nil, err
+	}
+	cfg.BuildContextWatcherHandler = func(conn *pgconn.PgConn) ctxwatch.Handler {
+		return &pgconn.CancelRequestContextWatcherHandler{Conn: conn, DeadlineDelay: 5 * time.Second}
+	}
+	return pgx.ConnectConfig(ctx, cfg)
 }
 
 func (s *session) lookupBase(ctx context.Context) (pg.Database, error) {
@@ -89,10 +109,16 @@ func (s *session) copyableBase(ctx context.Context) (pg.Database, error) {
 		return pg.Database{}, maintenanceError()
 	}
 	base, err := s.lookupBase(ctx)
-	if err == nil && base.Marker.IsOpen() {
-		return pg.Database{}, config.NewError(config.BaseOpen, "base database is open", "Use pgtwig base close.")
+	if err == nil && baseIsOpen(base) {
+		return pg.Database{}, baseOpenError()
 	}
 	return base, err
+}
+
+func baseIsOpen(base pg.Database) bool { return base.Marker.IsOpen() || base.AllowConnections }
+
+func baseOpenError() *config.Error {
+	return config.NewError(config.BaseOpen, "base database is open", "Use pgtwig base close.")
 }
 
 func maintenanceError() *config.Error {
@@ -103,7 +129,7 @@ func cleanupContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 }
 
-func (s *session) lock(ctx context.Context, purpose string, try bool, fn func() error) (acquired bool, err error) {
+func (s *session) lock(ctx context.Context, purpose string, try bool, warnings *[]string, fn func() error) (acquired bool, err error) {
 	sum := sha256.Sum256([]byte("pgtwig:" + s.Base + ":" + purpose))
 	key := int64(binary.BigEndian.Uint64(sum[:8]))
 	if try {
@@ -122,29 +148,54 @@ func (s *session) lock(ctx context.Context, purpose string, try bool, fn func() 
 		var unlocked bool
 		unlockErr := s.QueryRow(cleanup, "SELECT pg_advisory_unlock($1)", key).Scan(&unlocked)
 		if unlockErr != nil {
-			err = errors.Join(err, fmt.Errorf("release %s lock: %w", purpose, unlockErr))
+			unlockErr = fmt.Errorf("release %s lock: %w", purpose, unlockErr)
 		} else if !unlocked {
-			err = errors.Join(err, fmt.Errorf("%s lock was not held", purpose))
+			unlockErr = fmt.Errorf("%s lock was not held", purpose)
 		}
+		err = recordCleanup(err, unlockErr, warnings)
 	}()
 	return true, fn()
 }
 
-func (s *session) claim(ctx context.Context, fn func() error) error {
-	_, err := s.lock(ctx, "claim", false, fn)
+func (s *session) claim(ctx context.Context, warnings *[]string, fn func() error) error {
+	_, err := s.lock(ctx, "claim", false, warnings, fn)
 	return err
+}
+
+func recordCleanup(err, cleanupErr error, warnings *[]string) error {
+	if err == nil && cleanupErr != nil {
+		*warnings = append(*warnings, config.RedactConnectionDetails(cleanupErr.Error()))
+		return nil
+	}
+	return errors.Join(err, cleanupErr)
 }
 
 func databaseError(err error, hint string) error {
 	if _, ok := errors.AsType[*config.Error](err); ok {
 		return err
 	}
-	switch pg.State(err) {
+	pgErr, ok := errors.AsType[*pgconn.PgError](err)
+	if !ok {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return &config.Error{Code: config.Canceled, Message: "operation canceled", Cause: err}
+		}
+		return err
+	}
+	code := config.Internal
+	switch pgErr.Code {
 	case "55006":
 		return &config.Error{Code: config.DatabaseInUse, Message: "database is in use", Hint: hint, Cause: err}
 	case "42501":
 		return &config.Error{Code: config.InsufficientPrivilege, Message: "PostgreSQL denied the database operation", Cause: err}
+	case "42P04":
+		code = config.DatabaseExists
+	case "57014":
+		code = config.Canceled
 	default:
-		return err
+		if strings.HasPrefix(pgErr.Code, "53") {
+			code = config.ServerResources
+		}
 	}
+	return &config.Error{Code: code,
+		Message: fmt.Sprintf("%s (SQLSTATE %s)", config.RedactConnectionDetails(pgErr.Message), pgErr.Code), Cause: err}
 }

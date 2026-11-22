@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/toshi0607/pgtwig/internal/config"
 )
@@ -16,6 +17,9 @@ const maxIdentifier = 63
 var basePattern = regexp.MustCompile(`^[a-z_][a-z0-9_]{0,39}$`)
 
 func ValidateBase(base string) error {
+	if strings.Contains(base, "__") {
+		return config.NewError(config.ConfigInvalid, "invalid base name", "base names must not contain a double underscore")
+	}
 	if !basePattern.MatchString(base) {
 		return config.NewError(config.ConfigInvalid, "base name must match ^[a-z_][a-z0-9_]{0,39}$", "")
 	}
@@ -27,11 +31,11 @@ func Slug(branch string) string {
 }
 
 func BranchDB(base, branch string) (string, error) {
+	if branch == "" || !utf8.ValidString(branch) || strings.IndexByte(branch, 0) >= 0 {
+		return "", config.NewError(config.Usage, "branch name must be valid UTF-8", "")
+	}
 	if err := ValidateBase(base); err != nil {
 		return "", err
-	}
-	if branch == "" {
-		return "", config.NewError(config.Usage, "branch name must not be empty", "")
 	}
 	return base + "__" + slug(branch, maxIdentifier-len(base)-2), nil
 }

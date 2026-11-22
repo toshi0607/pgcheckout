@@ -51,7 +51,8 @@ func Rename(ctx context.Context, db DB, name, target string) error {
 
 func SessionCount(ctx context.Context, db DB, name string) (int, error) {
 	var count int
-	err := db.QueryRow(ctx, `SELECT count(*) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()`, name).Scan(&count)
+	err := db.QueryRow(ctx, `SELECT count(*) FROM pg_stat_activity
+		WHERE datname = $1 AND pid <> pg_backend_pid() AND backend_type = 'client backend'`, name).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("count database sessions: %w", err)
 	}
@@ -59,7 +60,8 @@ func SessionCount(ctx context.Context, db DB, name string) (int, error) {
 }
 
 func Terminate(ctx context.Context, db DB, name string) error {
-	rows, err := db.Query(ctx, `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()`, name)
+	rows, err := db.Query(ctx, `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+		WHERE datname = $1 AND pid <> pg_backend_pid() AND backend_type = 'client backend'`, name)
 	if err != nil {
 		return fmt.Errorf("terminate database sessions: %w", err)
 	}

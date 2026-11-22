@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"flag"
 	"io"
 	"strconv"
@@ -12,6 +13,7 @@ import (
 )
 
 type arguments struct {
+	help      bool
 	command   string
 	sub       string
 	pos       []string
@@ -58,10 +60,25 @@ func parse(args []string) (options arguments, format string, err error) {
 		return options, format, usage("a command is required")
 	}
 	options.command, rest = rest[0], rest[1:]
+	if options.command == "help" || isHelpFlag(options.command) {
+		if options.command == "help" && len(rest) == 1 && isHelpFlag(rest[0]) {
+			options.help = true
+			return options, format, nil
+		}
+		if len(rest) != 0 {
+			return options, format, usage("unexpected positional arguments")
+		}
+		options.command, options.help = "", true
+		return options, format, nil
+	}
 	switch options.command {
 	case "base", "pool", "hook":
 		if len(rest) == 0 {
 			return options, format, usage("a subcommand is required")
+		}
+		if isHelpFlag(rest[0]) {
+			options.help = true
+			return options, format, nil
 		}
 		options.sub, rest = rest[0], rest[1:]
 	}
@@ -73,6 +90,10 @@ func parse(args []string) (options arguments, format string, err error) {
 		return options, format, err
 	}
 	ordered, err := localFlags(local, rest)
+	if errors.Is(err, flag.ErrHelp) {
+		options.help = true
+		return options, format, nil
+	}
 	if err != nil {
 		return options, format, err
 	}
@@ -180,6 +201,9 @@ func (a *arguments) validate() error {
 	if a.size != nil && *a.size < 0 {
 		return usage("--size must be non-negative")
 	}
+	if a.ttl != nil && *a.ttl <= 0 {
+		return usage("--ttl must be greater than zero")
+	}
 	return a.env.Validate()
 }
 
@@ -226,6 +250,9 @@ func localFlags(fs *flag.FlagSet, args []string) ([]string, error) {
 			pos = append(pos, args...)
 			break
 		}
+		if isHelpFlag(arg) {
+			return nil, flag.ErrHelp
+		}
 		name, attached := flagName(arg)
 		if name == "" {
 			pos = append(pos, arg)
@@ -247,12 +274,16 @@ func localFlags(fs *flag.FlagSet, args []string) ([]string, error) {
 	return append(append(flags, "--"), pos...), nil
 }
 
+func isHelpFlag(arg string) bool { return arg == "--help" || arg == "-h" }
+
 func usage(message string) *config.Error {
 	return config.NewError(config.Usage, message, "")
 }
 
 func (a arguments) usageHint() string {
 	switch a.command {
+	case "":
+		return "Run pgtwig help."
 	case "ensure":
 		return "pgtwig ensure [branch] [--ttl <duration>] [--no-refill] [--env-file <path> [--env-key <NAME>]]"
 	case "reset":

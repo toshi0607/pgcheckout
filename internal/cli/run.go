@@ -24,6 +24,12 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer, version s
 		}
 		return writeError(stderr, format, err)
 	}
+	if options.help {
+		if err := writeHelp(stdout, format, options.command, options.sub); err != nil {
+			return writeError(stderr, format, err)
+		}
+		return 0
+	}
 	if options.command == "version" {
 		if err := writeResult(stdout, format, map[string]string{"version": version}); err != nil {
 			return writeError(stderr, format, err)
@@ -96,7 +102,7 @@ func (a arguments) prepareEnsureResult(cwd string, cfg config.Config, ensured br
 	if ensured.RefillNeeded {
 		var err error
 		refill, err = prepareRefill(cfg)
-		ensured.RefillStarted = refill != nil
+		ensured.RefillRequested = refill != nil
 		if err != nil {
 			ensured.Warnings = append(ensured.Warnings, "could not prepare a detached pool refill")
 		}

@@ -38,8 +38,11 @@ func TestBranchDB(t *testing.T) {
 		{"app", strings.Repeat("a", 100), "app__" + strings.Repeat("a", 49) + "_28165978", ""},
 		{strings.Repeat("b", 40), strings.Repeat("a", 100), strings.Repeat("b", 40) + "__" + strings.Repeat("a", 12) + "_28165978", ""},
 		{"app", "", "", config.Usage},
+		{"app", "a\xffb", "", config.Usage},
+		{"app", "a\x00b", "", config.Usage},
 		{"App", "main", "", config.ConfigInvalid},
 		{"1app", "main", "", config.ConfigInvalid},
+		{"app__nested", "main", "", config.ConfigInvalid},
 		{strings.Repeat("b", 41), "main", "", config.ConfigInvalid},
 	} {
 		got, err := BranchDB(tc.base, tc.branch)

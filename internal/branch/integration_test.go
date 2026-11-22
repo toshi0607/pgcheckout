@@ -43,7 +43,7 @@ func newFixture(t *testing.T, prepare func(*testing.T, *fixture)) *fixture {
 	}
 	base := "pgtwig_test_" + strings.TrimPrefix(random, "pt__tmp_")
 	f := &fixture{
-		svc:    Service{Config: config.Config{AdminURL: u, Base: base, PoolSize: 2, Strategy: "auto"}, Connect: pgx.Connect},
+		svc:    Service{Config: config.Config{AdminURL: u, Base: base, PoolSize: 2, Strategy: "auto"}},
 		source: base + "_source",
 		admin:  connectTestDB(t, rawURL),
 	}
@@ -130,6 +130,30 @@ func (f *fixture) exists(t *testing.T, name string) bool {
 		t.Fatal(err)
 	}
 	return found
+}
+
+func (f *fixture) database(t *testing.T, name string) pg.Database {
+	t.Helper()
+	d, found, err := pg.Lookup(t.Context(), f.admin, name)
+	if err != nil || !found {
+		t.Fatalf("look up %s: found=%t, err=%v", name, found, err)
+	}
+	return d
+}
+
+func (f *fixture) expire(t *testing.T, names ...string) {
+	t.Helper()
+	var now time.Time
+	if err := f.admin.QueryRow(t.Context(), "SELECT now()").Scan(&now); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range names {
+		m := f.database(t, name).Marker
+		m.ExpiresAt = now.Add(-time.Hour)
+		if err := pg.Comment(t.Context(), f.admin, name, m); err != nil {
+			t.Fatal(err)
+		}
+	}
 }
 
 func TestEnsureCreatesAndIsIdempotent(t *testing.T) {
@@ -348,14 +372,9 @@ func TestEnsureFailsWhileBaseOpen(t *testing.T) {
 
 func TestGCDropsExpiredOnly(t *testing.T) {
 	f := newFixture(t, nil)
-	expired, err := f.svc.Ensure(t.Context(), "expired", EnsureOptions{TTL: new(-time.Hour), NoRefill: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	held, err := f.svc.Ensure(t.Context(), "expired_in_use", EnsureOptions{TTL: new(-time.Hour), NoRefill: true})
-	if err != nil {
-		t.Fatal(err)
-	}
+	expired := f.ensure(t, "expired")
+	held := f.ensure(t, "expired_in_use")
+	f.expire(t, expired.Database, held.Database)
 	future, err := f.svc.Ensure(t.Context(), "future", EnsureOptions{TTL: new(time.Hour), NoRefill: true})
 	if err != nil {
 		t.Fatal(err)
@@ -385,5 +404,270 @@ func TestDropInUseNeedsForce(t *testing.T) {
 	}
 	if dropped, err := f.svc.Drop(t.Context(), "in_use", true); err != nil || !dropped.Dropped || f.exists(t, r.Database) {
 		t.Fatalf("forced drop: %+v, %v", dropped, err)
+	}
+}
+
+func TestAdoptRefusesOpenBase(t *testing.T) {
+	f := newFixture(t, nil)
+	name := f.svc.Config.Base
+	opened, err := f.svc.BaseOpen(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.svc.BaseAdopt(t.Context(), name, false); config.ErrorCode(err) != config.BaseOpen {
+		t.Fatalf("adopt open base error = %v, want base_open", err)
+	}
+	d := f.database(t, name)
+	if !d.AllowConnections || !d.Marker.IsOpen() || d.Marker.Gen != opened.Gen {
+		t.Fatalf("adopt changed open base: %+v", d)
+	}
+}
+
+func TestCloseRevertsWhenSessionSurvives(t *testing.T) {
+	f := newFixture(t, nil)
+	name := f.svc.Config.Base
+	opened, err := f.svc.BaseOpen(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	held := connectTestDB(t, f.svc.Config.DatabaseURL(name))
+	if _, err := f.svc.BaseClose(t.Context(), false); config.ErrorCode(err) != config.DatabaseInUse {
+		t.Fatalf("close with an active session = %v, want database_in_use", err)
+	}
+	d := f.database(t, name)
+	if !d.AllowConnections || !d.Marker.IsOpen() || d.Marker.Gen != opened.Gen {
+		t.Fatalf("unsuccessful close changed base state: %+v", d)
+	}
+	if err := held.Ping(t.Context()); err != nil {
+		t.Fatalf("close without --terminate disconnected the active session: %v", err)
+	}
+	closed, err := f.svc.BaseClose(t.Context(), true)
+	if err != nil || closed.Open || closed.AllowConnections || closed.Gen != opened.Gen+1 {
+		t.Fatalf("close with termination: %+v, %v", closed, err)
+	}
+	if err := held.Ping(t.Context()); err == nil {
+		t.Fatal("session survived close with termination")
+	}
+}
+
+func TestCloseRepairsAllowedConnections(t *testing.T) {
+	f := newFixture(t, nil)
+	name := f.svc.Config.Base
+	execTestSQL(t, f.admin, "ALTER DATABASE "+pg.Identifier(name)+" WITH ALLOW_CONNECTIONS true")
+	if _, err := f.svc.BaseAdopt(t.Context(), name, false); config.ErrorCode(err) != config.BaseOpen {
+		t.Fatalf("adopt base with connections enabled = %v, want base_open", err)
+	}
+	closed, err := f.svc.BaseClose(t.Context(), false)
+	if err != nil || !closed.Changed || closed.Open || closed.AllowConnections || closed.Gen != 2 {
+		t.Fatalf("close base with connections enabled: %+v, %v", closed, err)
+	}
+}
+
+func TestEnsureExistingBranchWhileBaseOpen(t *testing.T) {
+	f := newFixture(t, nil)
+	first := f.ensure(t, "existing")
+	if _, err := f.svc.BaseOpen(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	got, err := f.svc.Ensure(t.Context(), "existing", EnsureOptions{})
+	if err != nil || got.Created || got.Source != "existing" || got.Stale || got.BaseGen != first.Gen ||
+		got.DSNResult != first.DSNResult || got.RefillNeeded {
+		t.Fatalf("ensure existing with open base: source=%q created=%t gen=%d err=%v", got.Source, got.Created, got.BaseGen, err)
+	}
+	if _, err := f.svc.Ensure(t.Context(), "new", EnsureOptions{}); config.ErrorCode(err) != config.BaseOpen {
+		t.Fatalf("ensure new branch with open base = %v, want base_open", err)
+	}
+}
+
+func TestHostileBranchNames(t *testing.T) {
+	f := newFixture(t, nil)
+	for _, branch := range []string{"a'b", `a"b`, "a;b", `a\b`, "a b", strings.Repeat("a", 200)} {
+		got := f.ensure(t, branch)
+		dsn, err := f.svc.DSN(t.Context(), branch)
+		if err != nil || dsn != got.DSNResult || dsn.Branch != branch {
+			t.Fatalf("DSN did not match ensure for %q: %v", branch, err)
+		}
+		dropped, err := f.svc.Drop(t.Context(), branch, false)
+		if err != nil || !dropped.Dropped || dropped.Branch != branch || dropped.Database != got.Database || f.exists(t, got.Database) {
+			t.Fatalf("drop %q: %+v, %v", branch, dropped, err)
+		}
+	}
+}
+
+func TestTwoBasesAreIsolated(t *testing.T) {
+	f := newFixture(t, nil)
+	other := *f
+	otherName := f.svc.Config.Base + "b"
+	other.svc.Config.Base = otherName
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		dbs, err := pg.Databases(ctx, f.admin)
+		if err != nil {
+			t.Errorf("list test databases for cleanup: %v", err)
+			return
+		}
+		for _, d := range dbs {
+			if d.Name == otherName || naming.IsReservedName(otherName, d.Name) {
+				if err := pg.Exec(ctx, f.admin, "clean up test database", "DROP DATABASE "+pg.Identifier(d.Name)); err != nil {
+					t.Error(err)
+				}
+			}
+		}
+	})
+	if _, err := other.svc.BaseCreate(t.Context(), otherName, f.source, false); err != nil {
+		t.Fatal(err)
+	}
+	firstBranch := f.ensure(t, "topic")
+	otherBranch := other.ensure(t, "topic")
+	f.expire(t, firstBranch.Database, otherBranch.Database)
+	f.fill(t, 1)
+	other.fill(t, 1)
+	status, err := other.svc.PoolStatus(t.Context())
+	if err != nil || len(status.Databases) != 1 {
+		t.Fatalf("other pool status: %+v, %v", status, err)
+	}
+	otherPool := status.Databases[0].Name
+	for _, action := range []struct {
+		name string
+		run  func() error
+	}{
+		{"pool drain", func() error { _, err := f.svc.PoolDrain(t.Context()); return err }},
+		{"gc", func() error { _, err := f.svc.GC(t.Context(), false); return err }},
+		{"base close", func() error {
+			f.fill(t, 1)
+			if _, err := f.svc.BaseOpen(t.Context()); err != nil {
+				return err
+			}
+			_, err := f.svc.BaseClose(t.Context(), false)
+			return err
+		}},
+	} {
+		if err := action.run(); err != nil {
+			t.Fatalf("%s: %v", action.name, err)
+		}
+		for _, name := range []string{otherName, otherBranch.Database, otherPool} {
+			if !f.exists(t, name) {
+				t.Fatalf("%s removed other base's database %q", action.name, name)
+			}
+		}
+	}
+	list, err := f.svc.List(t.Context())
+	if err != nil || len(list.Unmanaged) != 0 || len(list.Pool) != 0 || len(list.Branches) != 0 {
+		t.Fatalf("list after isolated cleanup: %+v, %v", list, err)
+	}
+}
+
+func TestGCAndDrainSkipForgedAndForeign(t *testing.T) {
+	f := newFixture(t, nil)
+	base := f.svc.Config.Base
+	forged, foreign := base+"__pool_00000001", base+"__pool_00000002"
+	for _, name := range []string{forged, foreign} {
+		execTestSQL(t, f.admin, "CREATE DATABASE "+pg.Identifier(name)+" TEMPLATE template0")
+	}
+	execTestSQL(t, f.admin, "COMMENT ON DATABASE "+pg.Identifier(foreign)+
+		` IS '{"pgtwig":1,"kind":"pool","base":"another_base","gen":0}'`)
+	if _, err := f.svc.GC(t.Context(), false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.svc.PoolDrain(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.svc.BaseOpen(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.svc.BaseClose(t.Context(), false); err != nil {
+		t.Fatal(err)
+	}
+	if !f.exists(t, forged) || !f.exists(t, foreign) {
+		t.Fatal("a database without a matching marker was dropped")
+	}
+	list, err := f.svc.List(t.Context())
+	if err != nil || !slices.Equal(list.Unmanaged, []string{forged}) {
+		t.Fatalf("list unmanaged: %v, %v", list.Unmanaged, err)
+	}
+	doctor, err := f.svc.Doctor(t.Context())
+	if err != nil || !slices.Equal(doctor.Unmanaged, []string{forged}) ||
+		!strings.Contains(doctor.Note, "("+f.svc.Config.MaintenanceDB()+")") {
+		t.Fatalf("doctor unmanaged: %v, note: %q, err: %v", doctor.Unmanaged, doctor.Note, err)
+	}
+}
+
+func TestResetRecreatesFromCurrentBase(t *testing.T) {
+	f := newFixture(t, nil)
+	first := f.ensure(t, "topic")
+	initial := f.database(t, first.Database)
+	if _, err := f.svc.BaseOpen(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	base := connectTestDB(t, f.svc.Config.DatabaseURL(f.svc.Config.Base))
+	execTestSQL(t, base, "CREATE TABLE public.reset_data AS SELECT 42 AS value")
+	if err := base.Close(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.svc.BaseClose(t.Context(), true); err != nil {
+		t.Fatal(err)
+	}
+	reset, err := f.svc.Reset(t.Context(), "topic", false, EnsureOptions{NoRefill: true})
+	if err != nil || !reset.Reset || !reset.Created || reset.Stale || reset.Gen != 2 || reset.Database != first.Database {
+		t.Fatalf("reset did not recreate current-generation branch: %v", err)
+	}
+	if f.database(t, reset.Database).OID == initial.OID {
+		t.Fatal("reset preserved the original database")
+	}
+	branch := connectTestDB(t, reset.URL)
+	var value int
+	if err := branch.QueryRow(t.Context(), "SELECT value FROM public.reset_data").Scan(&value); err != nil || value != 42 {
+		t.Fatalf("reset branch data = %d, %v", value, err)
+	}
+}
+
+func TestPoolDrain(t *testing.T) {
+	f := newFixture(t, nil)
+	branch := f.ensure(t, "topic")
+	f.fill(t, 2)
+	list, err := f.svc.List(t.Context())
+	if err != nil || len(list.Pool) != 2 {
+		t.Fatalf("pool before drain: %+v, %v", list.Pool, err)
+	}
+	drained, err := f.svc.PoolDrain(t.Context())
+	if err != nil || len(drained.Dropped) != 2 || len(drained.Skipped) != 0 || !f.exists(t, branch.Database) {
+		t.Fatalf("drain: %+v, %v", drained, err)
+	}
+	for _, d := range list.Pool {
+		if !slices.Contains(drained.Dropped, d.Name) || f.exists(t, d.Name) {
+			t.Fatalf("drain missed pool database %q", d.Name)
+		}
+	}
+}
+
+func TestBaseAdoptIdempotent(t *testing.T) {
+	f := newFixture(t, nil)
+	before := f.database(t, f.source)
+	first, err := f.svc.BaseAdopt(t.Context(), f.source, false)
+	if err != nil || !first.Changed || first.Open || first.AllowConnections || first.Gen != 1 {
+		t.Fatalf("first adopt: %+v, %v", first, err)
+	}
+	second, err := f.svc.BaseAdopt(t.Context(), f.source, false)
+	if err != nil || second.Changed || second.BaseInfo != first.BaseInfo {
+		t.Fatalf("second adopt: %+v, %v", second, err)
+	}
+	after := f.database(t, f.source)
+	if after.OID != before.OID || after.AllowConnections || after.Marker.IsOpen() || !after.Marker.ValidFor(f.source) {
+		t.Fatalf("adopt did not preserve the original database: %+v", after)
+	}
+}
+
+func TestPoolClaimReportsReplicationWarnings(t *testing.T) {
+	f := newFixture(t, nil)
+	execTestSQL(t, f.admin, "ALTER DATABASE "+pg.Identifier(f.svc.Config.Base)+` SET search_path TO "schema/with/slashes"`)
+	filled, err := f.svc.PoolFill(t.Context(), 1)
+	if err != nil || filled.Created != 1 || filled.Discarded != 0 || len(filled.Warnings) != 1 {
+		t.Fatalf("fill with a setting that cannot be replicated: %+v, %v", filled, err)
+	}
+	claimed := f.ensure(t, "warned")
+	const warning = "1 per-database settings or grants could not be replicated from the base when this copy was made; run pgtwig doctor"
+	if claimed.Source != "pool" || !slices.Equal(claimed.Warnings, []string{warning}) {
+		t.Fatalf("claim: source=%q, warnings=%v", claimed.Source, claimed.Warnings)
 	}
 }

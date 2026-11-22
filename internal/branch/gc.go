@@ -2,6 +2,7 @@ package branch
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/toshi0607/pgtwig/internal/config"
@@ -15,14 +16,15 @@ type Skipped struct {
 }
 
 type GCResult struct {
-	Dropped []string  `json:"dropped"`
-	Skipped []Skipped `json:"skipped"`
-	DryRun  bool      `json:"dry_run"`
+	Dropped  []string  `json:"dropped"`
+	Skipped  []Skipped `json:"skipped"`
+	DryRun   bool      `json:"dry_run"`
+	Warnings []string  `json:"warnings,omitempty"`
 }
 
 func (svc Service) GC(ctx context.Context, dryRun bool) (GCResult, error) {
 	return run(ctx, svc, func(s *session) (result GCResult, err error) {
-		err = s.claim(ctx, func() error {
+		err = s.claim(ctx, &result.Warnings, func() error {
 			base, err := s.lookupBase(ctx)
 			if err != nil {
 				return err
@@ -39,7 +41,12 @@ func (s *session) sweep(ctx context.Context, gen int, gc, dryRun bool) (GCResult
 	if err != nil {
 		return GCResult{}, err
 	}
-	now := time.Now().UTC()
+	var now time.Time
+	if gc {
+		if err := s.QueryRow(ctx, "SELECT now()").Scan(&now); err != nil {
+			return GCResult{}, fmt.Errorf("read PostgreSQL server time: %w", err)
+		}
+	}
 	tmpCutoff := now.Add(-time.Hour)
 	return s.dropCandidates(ctx, dbs, dryRun, func(d pg.Database) bool {
 		m := d.Marker

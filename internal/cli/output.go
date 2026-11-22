@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -38,7 +39,14 @@ func writeError(out io.Writer, format string, err error) int {
 	problem, ok := errors.AsType[*config.Error](err)
 	if !ok {
 		problem = config.NewError(config.Internal, "could not complete the operation", "")
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			problem = config.NewError(config.Canceled, "operation canceled", "")
+		}
 	}
+	safe := *problem
+	safe.Message = config.RedactConnectionDetails(safe.Message)
+	safe.Hint = config.RedactConnectionDetails(safe.Hint)
+	problem = &safe
 	if format == "text" {
 		fmt.Fprintln(out, "error:", problem.Message)
 		if problem.Hint != "" {
@@ -57,14 +65,12 @@ func writeError(out io.Writer, format string, err error) int {
 }
 
 func writeRefillWarning(out io.Writer, format string) {
+	const message = "could not start detached pool refill"
 	if format == "text" {
-		fmt.Fprintln(out, "warning: could not start detached pool refill (refill_started=false)")
+		fmt.Fprintln(out, "warning:", message)
 		return
 	}
-	json.NewEncoder(out).Encode(struct {
-		Warning       string `json:"warning"`
-		RefillStarted bool   `json:"refill_started"`
-	}{Warning: "could not start detached pool refill"})
+	json.NewEncoder(out).Encode(map[string]*config.Error{"warning": config.NewError(config.RefillFailed, message, "")})
 }
 
 func writeReleaseWarning(out io.Writer, format string) {

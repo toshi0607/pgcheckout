@@ -3,6 +3,7 @@ package branch
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/toshi0607/pgtwig/internal/config"
@@ -71,12 +72,14 @@ type DoctorResult struct {
 	Pool       PoolCounts     `json:"pool"`
 	Unmanaged  []string       `json:"unmanaged"`
 	Problems   []config.Error `json:"problems"`
+	Note       string         `json:"note"`
 }
 
 func (svc Service) Doctor(ctx context.Context) (DoctorResult, error) {
 	return run(ctx, svc, func(s *session) (DoctorResult, error) {
 		result := DoctorResult{
 			Server: s.Server, Pool: PoolCounts{Target: s.Config.PoolSize}, Problems: make([]config.Error, 0),
+			Note: fmt.Sprintf("advisory locks are scoped to the maintenance database; every pgtwig user of this base must use the same maintenance database (%s)", s.Maintenance),
 		}
 		if !s.CanCreateDB {
 			result.Problems = append(result.Problems, *config.NewError(config.InsufficientPrivilege,
@@ -104,8 +107,8 @@ func (svc Service) Doctor(ctx context.Context) (DoctorResult, error) {
 		} else {
 			info := baseInfo(base)
 			result.Base = &info
-			if info.Open {
-				result.Problems = append(result.Problems, *config.NewError(config.BaseOpen, "base database is open", "Use pgtwig base close."))
+			if baseIsOpen(base) {
+				result.Problems = append(result.Problems, *baseOpenError())
 			}
 		}
 		if s.Base == s.Maintenance {
@@ -144,10 +147,11 @@ func (s *session) catalog(ctx context.Context) ([]pg.Database, []string, error) 
 	}
 	for _, d := range dbs {
 		valid := d.Marker.ValidFor(s.Base) && ((d.Name == s.Base) == (d.Marker.Kind == marker.Base))
+		foreign := d.Marker.Base != "" && d.Marker.Base != s.Base && d.Marker.ValidFor(d.Marker.Base)
 		switch {
 		case valid && d.Name != s.Maintenance:
 			managed = append(managed, d)
-		case !valid && naming.IsReservedName(s.Base, d.Name):
+		case !valid && !foreign && naming.IsReservedName(s.Base, d.Name):
 			unmanaged = append(unmanaged, d.Name)
 		}
 	}

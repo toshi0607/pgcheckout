@@ -35,6 +35,8 @@ func (s *session) checkMutation(ctx context.Context, db pg.DB, expected pg.Datab
 		return errDatabaseGone
 	case expected.OID != 0 && actual.OID != expected.OID:
 		return unmanaged()
+	case baseChange && actual.AllowConnections != expected.AllowConnections:
+		return unmanaged()
 	case adopt && name == s.Base && actual.Marker.PGTwig == 0 && expected.Marker.PGTwig == 0:
 		return nil
 	}
@@ -42,6 +44,7 @@ func (s *session) checkMutation(ctx context.Context, db pg.DB, expected pg.Datab
 	if !m.ValidFor(s.Base) || !slices.Contains(kinds, m.Kind) ||
 		m.Kind != expected.Marker.Kind || m.Branch != expected.Marker.Branch || m.Gen != expected.Marker.Gen ||
 		m.IsOpen() != expected.Marker.IsOpen() || m.Strategy != expected.Marker.Strategy ||
+		m.Warnings != expected.Marker.Warnings ||
 		!m.CreatedAt.Equal(expected.Marker.CreatedAt) || !m.ExpiresAt.Equal(expected.Marker.ExpiresAt) {
 		return unmanaged()
 	}
@@ -93,13 +96,15 @@ func (s *session) renameManaged(ctx context.Context, from pg.Database, target st
 	})
 }
 
-func (s *session) writeBase(ctx context.Context, base pg.Database, m marker.Marker, adopt bool) error {
+func (s *session) writeBase(ctx context.Context, base pg.Database, m marker.Marker, allow *bool, adopt bool) error {
 	err := pgx.BeginFunc(ctx, s.Conn, func(tx pgx.Tx) error {
 		if err := s.checkMutation(ctx, tx, base, adopt, marker.Base); err != nil {
 			return err
 		}
-		if err := pg.AllowConnections(ctx, tx, base.Name, m.IsOpen()); err != nil {
-			return err
+		if allow != nil {
+			if err := pg.AllowConnections(ctx, tx, base.Name, *allow); err != nil {
+				return err
+			}
 		}
 		return pg.Comment(ctx, tx, base.Name, m)
 	})
@@ -111,7 +116,13 @@ func (s *session) discardCopy(ctx context.Context, d pg.Database, cause error) e
 	defer cancel()
 	err := s.dropManaged(cleanup, d, false)
 	if err != nil && !errors.Is(err, errDatabaseGone) && pg.State(err) != "3D000" {
-		return errors.Join(cause, fmt.Errorf("clean up temporary database %q: %w", d.Name, err))
+		cleanupErr := fmt.Errorf("clean up temporary database %q: %w", d.Name, err)
+		if problem, ok := errors.AsType[*config.Error](cause); ok {
+			return &config.Error{Code: problem.Code, Hint: problem.Hint,
+				Message: config.RedactConnectionDetails(problem.Message + "; " + cleanupErr.Error()),
+				Cause:   errors.Join(cause, cleanupErr)}
+		}
+		return errors.Join(cause, cleanupErr)
 	}
 	return cause
 }

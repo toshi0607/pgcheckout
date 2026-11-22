@@ -14,15 +14,15 @@ type privilege struct {
 	grantable bool
 }
 
-func CopyACL(ctx context.Context, db DB, source Database, target, owner string) []string {
+func CopyACL(ctx context.Context, db DB, source Database, target, owner string) (warnings []string, revokeFailed bool) {
 	if !source.HasACL {
-		return nil
+		return nil, false
 	}
 	rows, err := db.Query(ctx, `SELECT CASE WHEN a.grantee = 0 THEN '' ELSE pg_get_userbyid(a.grantee) END,
 		a.privilege_type, a.grantee = 0, a.is_grantable
 		FROM pg_database AS d, aclexplode(d.datacl) AS a WHERE d.oid = $1`, source.OID)
 	if err != nil {
-		return []string{"could not read source database privileges"}
+		return []string{"could not read source database privileges"}, false
 	}
 	privileges, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (privilege, error) {
 		var p privilege
@@ -30,10 +30,9 @@ func CopyACL(ctx context.Context, db DB, source Database, target, owner string) 
 		return p, err
 	})
 	if err != nil {
-		return []string{"could not read source database privileges"}
+		return []string{"could not read source database privileges"}, false
 	}
 
-	var warnings []string
 	public := make(map[string]bool)
 	for _, p := range privileges {
 		if !p.public && p.role == owner {
@@ -66,7 +65,8 @@ func CopyACL(ctx context.Context, db DB, source Database, target, owner string) 
 		sql := "REVOKE " + privilege + " ON DATABASE " + Identifier(target) + " FROM PUBLIC"
 		if err := Exec(ctx, db, "revoke default database privilege", sql); err != nil {
 			warnings = append(warnings, fmt.Sprintf("could not revoke %s from PUBLIC", privilege))
+			revokeFailed = true
 		}
 	}
-	return warnings
+	return warnings, revokeFailed
 }

@@ -2,7 +2,10 @@ package branch
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
+	"time"
 
 	"github.com/toshi0607/pgtwig/internal/config"
 	"github.com/toshi0607/pgtwig/internal/marker"
@@ -43,13 +46,13 @@ func (svc Service) BaseCreate(ctx context.Context, name, from string, terminate 
 		if name == s.Maintenance || from == s.Maintenance {
 			return result, maintenanceError()
 		}
-		err = s.claim(ctx, func() error {
+		err = s.claim(ctx, &result.Warnings, func() error {
 			_, found, err := pg.Lookup(ctx, s.Conn, name)
 			if err != nil {
 				return err
 			}
 			if found {
-				return config.NewError(config.ConfigInvalid, "destination base database already exists", "")
+				return config.NewError(config.DatabaseExists, "destination base database already exists", "")
 			}
 			source, found, err := pg.Lookup(ctx, s.Conn, from)
 			if err != nil {
@@ -72,8 +75,19 @@ func (svc Service) BaseCreate(ctx context.Context, name, from string, terminate 
 				return databaseError(err, "Use --terminate to disconnect source database sessions.")
 			}
 			m := marker.New(marker.Base, name, 1)
-			if err := s.renameManaged(ctx, copied.database, name, m); err != nil {
+			m.Open = new(true)
+			if err := ctx.Err(); err != nil {
+				return s.discardCopy(ctx, copied.database, err)
+			}
+			transition, cancel := cleanupContext(ctx)
+			err = s.renameManaged(transition, copied.database, name, m)
+			cancel()
+			if err != nil {
 				return s.discardCopy(ctx, copied.database, databaseError(err, ""))
+			}
+			base := pg.Database{Name: name, OID: copied.database.OID, Marker: m}
+			if err := s.finishBaseClose(ctx, base, terminate, false); err != nil {
+				return err
 			}
 			result = BaseResult{
 				BaseInfo: BaseInfo{Name: name, Gen: 1}, Changed: true,
@@ -94,7 +108,7 @@ func (svc Service) BaseAdopt(ctx context.Context, name string, terminate bool) (
 		if s.Base == s.Maintenance {
 			return result, maintenanceError()
 		}
-		err = s.claim(ctx, func() error {
+		err = s.claim(ctx, &result.Warnings, func() error {
 			db, found, err := pg.Lookup(ctx, s.Conn, name)
 			if err != nil {
 				return err
@@ -103,23 +117,22 @@ func (svc Service) BaseAdopt(ctx context.Context, name string, terminate bool) (
 				return config.NewError(config.BaseNotFound, "base database does not exist", "")
 			}
 			m := db.Marker
-			if m.PGTwig == 1 && (m.Kind != marker.Base || !m.ValidFor(name)) {
-				return unmanaged()
+			if m.PGTwig == 1 {
+				if m.Kind != marker.Base || !m.ValidFor(name) {
+					return unmanaged()
+				}
+				if baseIsOpen(db) {
+					return baseOpenError()
+				}
+				result.BaseInfo = baseInfo(db)
+				return nil
 			}
-			if err := s.quiesce(ctx, name, terminate); err != nil {
+			m = marker.New(marker.Base, name, 1)
+			if err := s.closeBase(ctx, db, m, terminate, true); err != nil {
 				return err
 			}
-			changed := m.PGTwig == 0 || m.IsOpen() || db.AllowConnections || m.Open == nil
-			if changed {
-				if m.PGTwig == 0 {
-					m = marker.New(marker.Base, name, 1)
-				}
-				m.Open = new(false)
-				if err := s.writeBase(ctx, db, m, true); err != nil {
-					return err
-				}
-			}
-			result = BaseResult{BaseInfo: BaseInfo{Name: name, Gen: m.Gen}, Changed: changed}
+			result.BaseInfo = BaseInfo{Name: name, Gen: m.Gen}
+			result.Changed = true
 			return nil
 		})
 		return result, err
@@ -139,25 +152,26 @@ func (svc Service) changeBase(ctx context.Context, open, terminate bool) (BaseRe
 		if s.Base != "" && s.Base == s.Maintenance {
 			return result, maintenanceError()
 		}
-		err = s.claim(ctx, func() error {
+		err = s.claim(ctx, &result.Warnings, func() error {
 			db, err := s.lookupBase(ctx)
 			if err != nil {
 				return err
 			}
 			result.BaseInfo = baseInfo(db)
-			if db.Marker.IsOpen() == open && (!open || db.AllowConnections) {
+			if db.Marker.IsOpen() == open && db.AllowConnections == open {
 				return nil
 			}
 			m := db.Marker
-			if !open {
-				if err := s.quiesce(ctx, db.Name, terminate); err != nil {
+			if open {
+				m.Open = new(true)
+				if err := s.writeBase(ctx, db, m, new(true), false); err != nil {
+					return err
+				}
+			} else {
+				if err := s.closeBase(ctx, db, m, terminate, false); err != nil {
 					return err
 				}
 				m.Gen++
-			}
-			m.Open = new(open)
-			if err := s.writeBase(ctx, db, m, false); err != nil {
-				return err
 			}
 			result.BaseInfo = BaseInfo{Name: db.Name, Gen: m.Gen, Open: open, AllowConnections: open}
 			result.Changed = true
@@ -172,16 +186,86 @@ func (svc Service) changeBase(ctx context.Context, open, terminate bool) (BaseRe
 	})
 }
 
-func (s *session) quiesce(ctx context.Context, name string, terminate bool) error {
+func (s *session) closeBase(ctx context.Context, db pg.Database, m marker.Marker, terminate, adopt bool) error {
+	var terminateErr error
 	if terminate {
-		return databaseError(pg.Terminate(ctx, s.Conn, name), "")
+		terminateErr = pg.Terminate(ctx, s.Conn, db.Name)
 	}
-	count, err := pg.SessionCount(ctx, s.Conn, name)
+	if err := ctx.Err(); err != nil {
+		return errors.Join(err, terminateErr)
+	}
+	// Keep copies blocked until the session check and any generation bump are complete.
+	m.Open = new(true)
+	transition, cancel := cleanupContext(ctx)
+	err := s.writeBase(transition, db, m, new(false), adopt)
+	cancel()
 	if err != nil {
-		return err
+		return errors.Join(err, terminateErr)
 	}
-	if count > 0 {
-		return config.NewError(config.DatabaseInUse, "database is in use", "Use --terminate to disconnect database sessions.")
+	db.Marker = m
+	db.AllowConnections = false
+	if err := s.finishBaseClose(ctx, db, terminate, !adopt); err != nil {
+		return errors.Join(err, terminateErr)
 	}
 	return nil
+}
+
+func (s *session) finishBaseClose(ctx context.Context, db pg.Database, terminate, bump bool) error {
+	err := s.checkClosedSessions(ctx, db.Name, terminate)
+	if err == nil {
+		m := db.Marker
+		m.Open = new(false)
+		if bump {
+			m.Gen++
+		}
+		cleanup, cancel := cleanupContext(ctx)
+		defer cancel()
+		err = s.writeBase(cleanup, db, m, nil, false)
+	}
+	if err == nil {
+		return nil
+	}
+	cleanup, cancel := cleanupContext(ctx)
+	defer cancel()
+	if restoreErr := s.writeBase(cleanup, db, db.Marker, new(true), false); restoreErr != nil {
+		return &config.Error{
+			Code:    config.ErrorCode(databaseError(err, "")),
+			Message: fmt.Sprintf("%s; could not reopen base: %s", err, restoreErr),
+			Cause:   errors.Join(err, restoreErr),
+		}
+	}
+	return err
+}
+
+func (s *session) checkClosedSessions(ctx context.Context, name string, terminate bool) error {
+	count, err := pg.SessionCount(ctx, s.Conn, name)
+	var terminateErr error
+	if terminate {
+		for attempt := range 5 {
+			if err != nil || count == 0 {
+				break
+			}
+			if attempt > 0 {
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(200 * time.Millisecond):
+				}
+			}
+			terminateErr = pg.Terminate(ctx, s.Conn, name)
+			count, err = pg.SessionCount(ctx, s.Conn, name)
+		}
+	}
+	if err != nil {
+		return errors.Join(err, terminateErr)
+	}
+	if count == 0 {
+		return nil
+	}
+	message := "database is in use"
+	if terminateErr != nil {
+		message += ": " + terminateErr.Error()
+	}
+	return &config.Error{Code: config.DatabaseInUse, Message: message,
+		Hint: "Use --terminate to disconnect database sessions.", Cause: terminateErr}
 }
