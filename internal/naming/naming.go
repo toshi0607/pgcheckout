@@ -9,7 +9,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/toshi0607/pgtwig/internal/config"
+	"github.com/toshi0607/pgcheckout/internal/config"
 )
 
 const maxIdentifier = 63

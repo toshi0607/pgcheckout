@@ -13,10 +13,10 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/toshi0607/pgtwig/internal/config"
-	"github.com/toshi0607/pgtwig/internal/marker"
-	"github.com/toshi0607/pgtwig/internal/naming"
-	"github.com/toshi0607/pgtwig/internal/pg"
+	"github.com/toshi0607/pgcheckout/internal/config"
+	"github.com/toshi0607/pgcheckout/internal/marker"
+	"github.com/toshi0607/pgcheckout/internal/naming"
+	"github.com/toshi0607/pgcheckout/internal/pg"
 )
 
 type fixture struct {
@@ -28,9 +28,9 @@ type fixture struct {
 
 func newFixture(t *testing.T, prepare func(*testing.T, *fixture)) *fixture {
 	t.Helper()
-	rawURL := os.Getenv("PGTWIG_TEST_ADMIN_URL")
+	rawURL := os.Getenv("PGCHECKOUT_TEST_ADMIN_URL")
 	if rawURL == "" {
-		t.Skip("PGTWIG_TEST_ADMIN_URL is not set")
+		t.Skip("PGCHECKOUT_TEST_ADMIN_URL is not set")
 	}
 	t.Parallel()
 	u, err := config.ParseAdminURL(rawURL)
@@ -41,7 +41,7 @@ func newFixture(t *testing.T, prepare func(*testing.T, *fixture)) *fixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	base := "pgtwig_test_" + strings.TrimPrefix(random, "pt__tmp_")
+	base := "pgcheckout_test_" + strings.TrimPrefix(random, "pt__tmp_")
 	f := &fixture{
 		svc:    Service{Config: config.Config{AdminURL: u, Base: base, PoolSize: 2, Strategy: "auto"}},
 		source: base + "_source",
@@ -566,7 +566,7 @@ func TestGCAndDrainSkipForgedAndForeign(t *testing.T) {
 		execTestSQL(t, f.admin, "CREATE DATABASE "+pg.Identifier(name)+" TEMPLATE template0")
 	}
 	execTestSQL(t, f.admin, "COMMENT ON DATABASE "+pg.Identifier(foreign)+
-		` IS '{"pgtwig":1,"kind":"pool","base":"another_base","gen":0}'`)
+		` IS '{"pgcheckout":1,"kind":"pool","base":"another_base","gen":0}'`)
 	if _, err := f.svc.GC(t.Context(), false); err != nil {
 		t.Fatal(err)
 	}
@@ -666,7 +666,7 @@ func TestPoolClaimReportsReplicationWarnings(t *testing.T) {
 		t.Fatalf("fill with a setting that cannot be replicated: %+v, %v", filled, err)
 	}
 	claimed := f.ensure(t, "warned")
-	const warning = "1 per-database settings or grants could not be replicated from the base when this copy was made; run pgtwig doctor"
+	const warning = "1 per-database settings or grants could not be replicated from the base when this copy was made; run pgcheckout doctor"
 	if claimed.Source != "pool" || !slices.Equal(claimed.Warnings, []string{warning}) {
 		t.Fatalf("claim: source=%q, warnings=%v", claimed.Source, claimed.Warnings)
 	}

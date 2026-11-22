@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/toshi0607/pgtwig/internal/branch"
-	"github.com/toshi0607/pgtwig/internal/config"
-	"github.com/toshi0607/pgtwig/internal/gitx"
+	"github.com/toshi0607/pgcheckout/internal/branch"
+	"github.com/toshi0607/pgcheckout/internal/config"
+	"github.com/toshi0607/pgcheckout/internal/gitx"
 )
 
 func TestErrorOutput(t *testing.T) {
@@ -104,8 +104,8 @@ func TestEnvFlags(t *testing.T) {
 func TestHookCommands(t *testing.T) {
 	t.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
 	t.Setenv("GIT_CONFIG_SYSTEM", "/dev/null")
-	t.Setenv("PGTWIG_ADMIN_URL", "invalid")
-	t.Setenv("PGTWIG_BASE", "")
+	t.Setenv("PGCHECKOUT_ADMIN_URL", "invalid")
+	t.Setenv("PGCHECKOUT_BASE", "")
 	t.Chdir(t.TempDir())
 	cmd := exec.CommandContext(t.Context(), "git", "init", "--template=")
 	if out, err := cmd.CombinedOutput(); err != nil {

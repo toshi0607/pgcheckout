@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/toshi0607/pgtwig/internal/config"
+	"github.com/toshi0607/pgcheckout/internal/config"
 )
 
 func TestSlug(t *testing.T) {

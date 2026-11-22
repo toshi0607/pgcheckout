@@ -9,8 +9,8 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 
-	"github.com/toshi0607/pgtwig/internal/marker"
-	"github.com/toshi0607/pgtwig/internal/naming"
+	"github.com/toshi0607/pgcheckout/internal/marker"
+	"github.com/toshi0607/pgcheckout/internal/naming"
 )
 
 type commentRecorder struct {

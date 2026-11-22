@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/toshi0607/pgtwig/internal/config"
-	"github.com/toshi0607/pgtwig/internal/marker"
-	"github.com/toshi0607/pgtwig/internal/pg"
+	"github.com/toshi0607/pgcheckout/internal/config"
+	"github.com/toshi0607/pgcheckout/internal/marker"
+	"github.com/toshi0607/pgcheckout/internal/pg"
 )
 
 type Skipped struct {

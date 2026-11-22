@@ -5,7 +5,7 @@ import (
 	"os"
 	"os/signal"
 
-	"github.com/toshi0607/pgtwig/internal/cli"
+	"github.com/toshi0607/pgcheckout/internal/cli"
 )
 
 var version = "dev"

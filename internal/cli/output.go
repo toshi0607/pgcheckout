@@ -9,7 +9,7 @@ import (
 	"maps"
 	"slices"
 
-	"github.com/toshi0607/pgtwig/internal/config"
+	"github.com/toshi0607/pgcheckout/internal/config"
 )
 
 func writeResult(out io.Writer, format string, value any) error {

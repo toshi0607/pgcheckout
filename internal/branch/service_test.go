@@ -10,7 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
-	"github.com/toshi0607/pgtwig/internal/config"
+	"github.com/toshi0607/pgcheckout/internal/config"
 )
 
 func TestDatabaseError(t *testing.T) {

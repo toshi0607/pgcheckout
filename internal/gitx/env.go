@@ -5,7 +5,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/toshi0607/pgtwig/internal/config"
+	"github.com/toshi0607/pgcheckout/internal/config"
 )
 
 var envKeyPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)

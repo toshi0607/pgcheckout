@@ -13,10 +13,10 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgconn/ctxwatch"
 
-	"github.com/toshi0607/pgtwig/internal/config"
-	"github.com/toshi0607/pgtwig/internal/marker"
-	"github.com/toshi0607/pgtwig/internal/naming"
-	"github.com/toshi0607/pgtwig/internal/pg"
+	"github.com/toshi0607/pgcheckout/internal/config"
+	"github.com/toshi0607/pgcheckout/internal/marker"
+	"github.com/toshi0607/pgcheckout/internal/naming"
+	"github.com/toshi0607/pgcheckout/internal/pg"
 )
 
 type Service struct {
@@ -32,7 +32,7 @@ type session struct {
 
 func run[T any](ctx context.Context, svc Service, fn func(*session) (T, error)) (result T, err error) {
 	if svc.Config.AdminURL == nil {
-		return result, config.NewError(config.ConfigMissing, "admin URL is required", "Set PGTWIG_ADMIN_URL or pass --admin-url.")
+		return result, config.NewError(config.ConfigMissing, "admin URL is required", "Set PGCHECKOUT_ADMIN_URL or pass --admin-url.")
 	}
 	connect := svc.Connect
 	if connect == nil {
@@ -86,7 +86,7 @@ func connectMaintenance(ctx context.Context, url string) (*pgx.Conn, error) {
 
 func (s *session) lookupBase(ctx context.Context) (pg.Database, error) {
 	if s.Base == "" {
-		return pg.Database{}, config.NewError(config.ConfigMissing, "base name is required", "Set PGTWIG_BASE or pass --base.")
+		return pg.Database{}, config.NewError(config.ConfigMissing, "base name is required", "Set PGCHECKOUT_BASE or pass --base.")
 	}
 	if err := naming.ValidateBase(s.Base); err != nil {
 		return pg.Database{}, err
@@ -98,7 +98,7 @@ func (s *session) lookupBase(ctx context.Context) (pg.Database, error) {
 	case !found:
 		return pg.Database{}, config.NewError(config.BaseNotFound, "base database does not exist", "")
 	case !db.Marker.ValidFor(s.Base) || db.Marker.Kind != marker.Base:
-		return pg.Database{}, config.NewError(config.BaseNotMarked, "base database has no base marker", "Use pgtwig base adopt.")
+		return pg.Database{}, config.NewError(config.BaseNotMarked, "base database has no base marker", "Use pgcheckout base adopt.")
 	default:
 		return db, nil
 	}
@@ -118,7 +118,7 @@ func (s *session) copyableBase(ctx context.Context) (pg.Database, error) {
 func baseIsOpen(base pg.Database) bool { return base.Marker.IsOpen() || base.AllowConnections }
 
 func baseOpenError() *config.Error {
-	return config.NewError(config.BaseOpen, "base database is open", "Use pgtwig base close.")
+	return config.NewError(config.BaseOpen, "base database is open", "Use pgcheckout base close.")
 }
 
 func maintenanceError() *config.Error {
@@ -130,7 +130,7 @@ func cleanupContext(ctx context.Context) (context.Context, context.CancelFunc) {
 }
 
 func (s *session) lock(ctx context.Context, purpose string, try bool, warnings *[]string, fn func() error) (acquired bool, err error) {
-	sum := sha256.Sum256([]byte("pgtwig:" + s.Base + ":" + purpose))
+	sum := sha256.Sum256([]byte("pgcheckout:" + s.Base + ":" + purpose))
 	key := int64(binary.BigEndian.Uint64(sum[:8]))
 	if try {
 		if err := s.QueryRow(ctx, "SELECT pg_try_advisory_lock($1)", key).Scan(&acquired); err != nil {

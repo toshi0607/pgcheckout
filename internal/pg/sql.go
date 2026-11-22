@@ -9,7 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/toshi0607/pgtwig/internal/marker"
+	"github.com/toshi0607/pgcheckout/internal/marker"
 )
 
 func Identifier(name string) string { return pgx.Identifier{name}.Sanitize() }

@@ -16,20 +16,20 @@ func TestRoundTrip(t *testing.T) {
 		include []string
 	}{
 		{
-			Marker{PGTwig: 1, Kind: Base, Base: "app", Gen: 1, CreatedAt: created, Open: new(false)},
+			Marker{PGCheckout: 1, Kind: Base, Base: "app", Gen: 1, CreatedAt: created, Open: new(false)},
 			[]string{"branch", "strategy", "expires_at", "warnings"}, []string{`"open":false`},
 		},
 		{
-			Marker{PGTwig: 1, Kind: Branch, Base: "app", Gen: 2, Branch: "feat/login",
+			Marker{PGCheckout: 1, Kind: Branch, Base: "app", Gen: 2, Branch: "feat/login",
 				CreatedAt: created, ExpiresAt: created.Add(time.Hour), Strategy: "wal_log"},
 			[]string{"open"}, []string{`"expires_at":"2026-11-22T07:00:00Z"`, `"branch":"feat/login"`},
 		},
 		{
-			Marker{PGTwig: 1, Kind: Pool, Base: "app", Gen: 2, CreatedAt: created, Strategy: "wal_log", Warnings: 2},
+			Marker{PGCheckout: 1, Kind: Pool, Base: "app", Gen: 2, CreatedAt: created, Strategy: "wal_log", Warnings: 2},
 			[]string{"branch", "open", "expires_at"}, []string{`"strategy":"wal_log"`, `"warnings":2`},
 		},
 		{
-			Marker{PGTwig: 1, Kind: Tmp, Base: "app", Gen: 2, CreatedAt: created, Strategy: "wal_log"},
+			Marker{PGCheckout: 1, Kind: Tmp, Base: "app", Gen: 2, CreatedAt: created, Strategy: "wal_log"},
 			[]string{"branch", "open", "expires_at"}, []string{`"kind":"tmp"`},
 		},
 	} {
@@ -57,7 +57,7 @@ func TestRoundTrip(t *testing.T) {
 }
 
 func TestParseForeign(t *testing.T) {
-	for _, comment := range []string{"", "regular comment", `{"pgtwig":`, `{"kind":"branch"}`, `{"pgtwig":2}`, `{"PGTWIG":1}`, `{"pgtwig":"1"}`, `null`, `[]`} {
+	for _, comment := range []string{"", "regular comment", `{"pgcheckout":`, `{"kind":"branch"}`, `{"pgcheckout":2}`, `{"PGCHECKOUT":1}`, `{"pgcheckout":"1"}`, `null`, `[]`} {
 		if _, ok := Parse(comment); ok {
 			t.Errorf("Parse(%q) accepted a foreign comment", comment)
 		}
@@ -65,7 +65,7 @@ func TestParseForeign(t *testing.T) {
 }
 
 func TestMarkerFieldsAreCaseSensitive(t *testing.T) {
-	m, ok := Parse(`{"pgtwig":1,"kind":"pool","base":"another","Base":"app"}`)
+	m, ok := Parse(`{"pgcheckout":1,"kind":"pool","base":"another","Base":"app"}`)
 	if !ok || m.ValidFor("app") || !m.ValidFor("another") {
 		t.Fatal("marker accepted a base from a differently cased key")
 	}

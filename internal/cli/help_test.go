@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/toshi0607/pgtwig/internal/config"
+	"github.com/toshi0607/pgcheckout/internal/config"
 )
 
 func TestHelp(t *testing.T) {
@@ -24,7 +24,7 @@ func TestHelp(t *testing.T) {
 		if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
 			t.Fatal(err)
 		}
-		if got.Usage != "pgtwig [global flags] <command> ..." || got.ExitCodes["2"] != "usage error" ||
+		if got.Usage != "pgcheckout [global flags] <command> ..." || got.ExitCodes["2"] != "usage error" ||
 			len(got.GlobalFlags) == 0 || len(got.Env) == 0 {
 			t.Fatalf("incomplete help: %s", &stdout)
 		}
@@ -47,13 +47,13 @@ func TestTextHelpAndMissingCommand(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	args := []string{"ensure", "--help", "--format", "text"}
 	if code := Run(t.Context(), args, &stdout, &stderr, "dev"); code != 0 || stderr.Len() != 0 ||
-		!strings.HasPrefix(stdout.String(), "Usage: pgtwig [global flags] ensure [branch]") ||
+		!strings.HasPrefix(stdout.String(), "Usage: pgcheckout [global flags] ensure [branch]") ||
 		!strings.Contains(stdout.String(), "--ttl <duration>") {
 		t.Fatalf("Run(%v) = (%d, %q, %q)", args, code, &stdout, &stderr)
 	}
 	stdout.Reset()
 	if code := Run(t.Context(), nil, &stdout, &stderr, "dev"); code != 2 || stdout.Len() != 0 ||
-		!strings.Contains(stderr.String(), `"hint":"Run pgtwig help."`) {
+		!strings.Contains(stderr.String(), `"hint":"Run pgcheckout help."`) {
 		t.Fatalf("Run without a command = (%d, %q, %q)", code, &stdout, &stderr)
 	}
 }

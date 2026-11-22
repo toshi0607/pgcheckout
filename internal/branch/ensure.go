@@ -8,10 +8,10 @@ import (
 	"slices"
 	"time"
 
-	"github.com/toshi0607/pgtwig/internal/config"
-	"github.com/toshi0607/pgtwig/internal/marker"
-	"github.com/toshi0607/pgtwig/internal/naming"
-	"github.com/toshi0607/pgtwig/internal/pg"
+	"github.com/toshi0607/pgcheckout/internal/config"
+	"github.com/toshi0607/pgcheckout/internal/marker"
+	"github.com/toshi0607/pgcheckout/internal/naming"
+	"github.com/toshi0607/pgcheckout/internal/pg"
 )
 
 type EnsureOptions struct {
@@ -188,7 +188,7 @@ func (s *session) claimPool(ctx context.Context, gen int, name, branch string, o
 		}
 		result := s.ensureResult(pg.Database{Name: name, Marker: m}, gen, "pool")
 		if m.Warnings > 0 {
-			result.Warnings = []string{fmt.Sprintf("%d per-database settings or grants could not be replicated from the base when this copy was made; run pgtwig doctor", m.Warnings)}
+			result.Warnings = []string{fmt.Sprintf("%d per-database settings or grants could not be replicated from the base when this copy was made; run pgcheckout doctor", m.Warnings)}
 		}
 		s.checkRefill(ctx, &result, opts)
 		return result, nil
@@ -248,7 +248,7 @@ func (s *session) lookupBranch(ctx context.Context, name, branch string) (pg.Dat
 
 func branchDatabase(base, branch string) (string, error) {
 	if base == "" {
-		return "", config.NewError(config.ConfigMissing, "base name is required", "Set PGTWIG_BASE or pass --base.")
+		return "", config.NewError(config.ConfigMissing, "base name is required", "Set PGCHECKOUT_BASE or pass --base.")
 	}
 	return naming.BranchDB(base, branch)
 }

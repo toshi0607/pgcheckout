@@ -1,4 +1,4 @@
-module github.com/toshi0607/pgtwig
+module github.com/toshi0607/pgcheckout
 
 go 1.26.1
 

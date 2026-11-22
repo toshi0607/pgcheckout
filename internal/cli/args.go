@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/toshi0607/pgtwig/internal/config"
-	"github.com/toshi0607/pgtwig/internal/gitx"
+	"github.com/toshi0607/pgcheckout/internal/config"
+	"github.com/toshi0607/pgcheckout/internal/gitx"
 )
 
 type arguments struct {
@@ -29,7 +29,7 @@ type arguments struct {
 }
 
 func parse(args []string) (options arguments, format string, err error) {
-	global := flag.NewFlagSet("pgtwig", flag.ContinueOnError)
+	global := flag.NewFlagSet("pgcheckout", flag.ContinueOnError)
 	global.SetOutput(io.Discard)
 	adminURL := global.String("admin-url", "", "")
 	base := global.String("base", "", "")
@@ -283,19 +283,19 @@ func usage(message string) *config.Error {
 func (a arguments) usageHint() string {
 	switch a.command {
 	case "":
-		return "Run pgtwig help."
+		return "Run pgcheckout help."
 	case "ensure":
-		return "pgtwig ensure [branch] [--ttl <duration>] [--no-refill] [--env-file <path> [--env-key <NAME>]]"
+		return "pgcheckout ensure [branch] [--ttl <duration>] [--no-refill] [--env-file <path> [--env-key <NAME>]]"
 	case "reset":
-		return "pgtwig reset [branch] [--force] [--ttl <duration>] [--no-refill] [--env-file <path> [--env-key <NAME>]]"
+		return "pgcheckout reset [branch] [--force] [--ttl <duration>] [--no-refill] [--env-file <path> [--env-key <NAME>]]"
 	case "hook":
 		switch a.sub {
 		case "install":
-			return "pgtwig hook install [--env-file <path> [--env-key <NAME>]] [--force]"
+			return "pgcheckout hook install [--env-file <path> [--env-key <NAME>]] [--force]"
 		case "uninstall":
-			return "pgtwig hook uninstall"
+			return "pgcheckout hook uninstall"
 		default:
-			return "pgtwig hook install | uninstall"
+			return "pgcheckout hook install | uninstall"
 		}
 	}
 	return ""

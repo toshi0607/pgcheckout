@@ -1,6 +1,6 @@
-# pgtwig
+# pgcheckout
 
-pgtwig は、PostgreSQL 互換のサーバーの中で開発用のデータベースを複製し、git のブランチごとに 1 つずつ割り当てる CLI である。
+pgcheckout は、PostgreSQL 互換のサーバーの中で開発用のデータベースを複製し、git のブランチごとに 1 つずつ割り当てる CLI である。
 複製を先に作っておき、要求が来たら名前を付け替えて渡すので、ブランチ用のデータベースは数十ミリ秒で手に入る。
 
 名前は仮のものである。
@@ -28,39 +28,39 @@ PostgreSQL 18.7 と AlloyDB Omni 17.10 で結合テストを実行している�
 ビルドする。
 
 ```bash
-go build -o bin/pgtwig ./cmd/pgtwig
+go build -o bin/pgcheckout ./cmd/pgcheckout
 ```
 
 管理用の接続先とベースの名前を環境変数で渡す。
 管理用の接続先には、複製元でもブランチでもないデータベース（`postgres` など）を指定する。
 
 ```bash
-export PGTWIG_ADMIN_URL=postgres://dev@127.0.0.1:5432/postgres
+export PGCHECKOUT_ADMIN_URL=postgres://dev@127.0.0.1:5432/postgres
 ```
 
 ```bash
-export PGTWIG_BASE=app
+export PGCHECKOUT_BASE=app
 ```
 
 既存の開発用データベース `app_dev` を複製して、ベース `app` を作る。
 ベースは接続を禁止した状態で保存され、`app_dev` はそのまま使える。
 
 ```bash
-pgtwig base create app --from app_dev
+pgcheckout base create app --from app_dev
 ```
 
 現在の git ブランチ用のデータベースを用意する。
 何度実行しても、同じブランチには同じデータベースが返る。
 
 ```bash
-pgtwig ensure
+pgcheckout ensure
 ```
 
 ```json
 {"branch":"feat/login","database":"app__feat_login_d668f008","url":"postgres://dev@127.0.0.1:5432/app__feat_login_d668f008","created":true,"source":"pool","stale":false,"gen":1,"base_gen":1,"strategy":"file_copy_clone","elapsed_ms":2,"refill_requested":true}
 ```
 
-`refill_requested: true` の場合、pgtwig は結果を出力したあとにバックグラウンドでプールの補充プロセスを起動する。
+`refill_requested: true` の場合、pgcheckout は結果を出力したあとにバックグラウンドでプールの補充プロセスを起動する。
 起動に失敗すると標準エラーに `{"warning":{"code":"refill_failed","message":"..."}}` を出力し、終了コードは 0 のままとする。
 
 ## git のブランチ切り替えに連動させる
@@ -68,10 +68,10 @@ pgtwig ensure
 post-checkout フックを入れると、ブランチを切り替えるたびに接続先がファイルへ書き出される。
 
 ```bash
-pgtwig hook install --env-file .env.pgtwig
+pgcheckout hook install --env-file .env.pgcheckout
 ```
 
-`.env.pgtwig` には `DATABASE_URL=...` の 1 行が書かれる。
+`.env.pgcheckout` には `DATABASE_URL=...` の 1 行が書かれる。
 フックは、リポジトリの `.git/hooks` に置く。`core.hooksPath` が指す共有のディレクトリには書き込まない。
 
 ## ベースを更新する
@@ -80,15 +80,15 @@ pgtwig hook install --env-file .env.pgtwig
 閉じるとベースの世代が 1 増え、古い世代から作ったプールが破棄される。
 
 ```bash
-pgtwig base open
+pgcheckout base open
 ```
 
 ```bash
-pgtwig base close
+pgcheckout base close
 ```
 
 既存のブランチは作り直されない。古い世代のブランチには、`ensure` と `list` の出力で `stale: true` が付く。
-作り直すときは `pgtwig reset` を使う。
+作り直すときは `pgcheckout reset` を使う。
 
 ## コマンド
 
@@ -111,12 +111,12 @@ pgtwig base close
 
 | 環境変数 | フラグ | 意味 |
 |---|---|---|
-| `PGTWIG_ADMIN_URL` | `--admin-url` | 管理用データベースへの接続文字列 |
-| `PGTWIG_BASE` | `--base` | ベースの名前 |
-| `PGTWIG_POOL_SIZE` | `--pool-size` | プールの目標数（既定 2、0 で無効） |
-| `PGTWIG_STRATEGY` | `--strategy` | 複製の方式（既定 `auto`） |
+| `PGCHECKOUT_ADMIN_URL` | `--admin-url` | 管理用データベースへの接続文字列 |
+| `PGCHECKOUT_BASE` | `--base` | ベースの名前 |
+| `PGCHECKOUT_POOL_SIZE` | `--pool-size` | プールの目標数（既定 2、0 で無効） |
+| `PGCHECKOUT_STRATEGY` | `--strategy` | 複製の方式（既定 `auto`） |
 
-秘密でない値は、リポジトリの `.pgtwig.json` にも書ける。
+秘密でない値は、リポジトリの `.pgcheckout.json` にも書ける。
 
 ```json
 {"base": "app", "pool_size": 2}
@@ -132,7 +132,7 @@ pgtwig base close
 
 ## 削除の範囲
 
-pgtwig が削除するのは、データベースのコメントに pgtwig の目印があり、指定したベースに属するブランチ、プール、複製途中のデータベースだけである。
+pgcheckout が削除するのは、データベースのコメントに pgcheckout の目印があり、指定したベースに属するブランチ、プール、複製途中のデータベースだけである。
 ベースと管理用データベースは削除しない。
 名前が規則に合っていても目印の無いデータベースは、`list` と `doctor` が `unmanaged` として報告するだけにする。
 
@@ -153,7 +153,7 @@ go test ./...
 結合テストは、`CREATEDB` を持つロールの接続先を渡して実行する。
 
 ```bash
-PGTWIG_TEST_ADMIN_URL=postgres://dev@127.0.0.1:5432/postgres go test -tags integration ./...
+PGCHECKOUT_TEST_ADMIN_URL=postgres://dev@127.0.0.1:5432/postgres go test -tags integration ./...
 ```
 
 設計は [DESIGN.md](DESIGN.md) にある。

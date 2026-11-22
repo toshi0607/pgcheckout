@@ -7,7 +7,7 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/toshi0607/pgtwig/internal/config"
+	"github.com/toshi0607/pgcheckout/internal/config"
 )
 
 func TestInstallHook(t *testing.T) {
@@ -28,11 +28,11 @@ func TestInstallHook(t *testing.T) {
 				t.Fatalf("InstallHook = %+v, %v, want %+v", result, err, want)
 			}
 			checkFile(t, path, `#!/bin/sh
-# managed by pgtwig; do not edit
+# managed by pgcheckout; do not edit
 # $3 is 1 for a branch checkout, 0 for a file checkout.
 [ "$3" = "1" ] || exit 0
-command -v pgtwig >/dev/null 2>&1 || exit 0
-pgtwig ensure`+tc.args+` >/dev/null || echo "pgtwig: ensure failed; the branch database was not switched" >&2
+command -v pgcheckout >/dev/null 2>&1 || exit 0
+pgcheckout ensure`+tc.args+` >/dev/null || echo "pgcheckout: ensure failed; the branch database was not switched" >&2
 exit 0
 `)
 			if info := fileInfo(t, path); runtime.GOOS != "windows" && info.Mode().Perm() != 0o755 {
@@ -61,7 +61,7 @@ func TestInstallHookForce(t *testing.T) {
 	checkFile(t, path, original)
 	checkEntries(t, filepath.Dir(path), "post-checkout")
 
-	backup := path + ".pgtwig-backup"
+	backup := path + ".pgcheckout-backup"
 	want := InstallResult{Hook: path, Installed: true, Changed: true, Backup: backup}
 	result, err := InstallHook(t.Context(), dir, EnvOptions{}, true)
 	if err != nil || result != want {
@@ -82,7 +82,7 @@ func TestInstallHookForce(t *testing.T) {
 	}
 	checkFile(t, path, replacement)
 	checkFile(t, backup, original)
-	checkEntries(t, filepath.Dir(path), "post-checkout", "post-checkout.pgtwig-backup")
+	checkEntries(t, filepath.Dir(path), "post-checkout", "post-checkout.pgcheckout-backup")
 }
 
 func TestUninstallHook(t *testing.T) {
@@ -93,7 +93,7 @@ func TestUninstallHook(t *testing.T) {
 		t.Fatalf("missing UninstallHook = %+v, %v, want %+v", result, err, want)
 	}
 
-	const original = "#!/bin/sh\n# unmanaged\n# managed by pgtwig; do not edit\n"
+	const original = "#!/bin/sh\n# unmanaged\n# managed by pgcheckout; do not edit\n"
 	writeTestHook(t, path, original)
 	if _, err := UninstallHook(t.Context(), dir); config.ErrorCode(err) != config.UnmanagedFile {
 		t.Fatalf("unmanaged UninstallHook = %v, want unmanaged_file", err)
@@ -104,12 +104,12 @@ func TestUninstallHook(t *testing.T) {
 	}
 
 	want.Removed = true
-	want.Backup = path + ".pgtwig-backup"
+	want.Backup = path + ".pgcheckout-backup"
 	result, err = UninstallHook(t.Context(), dir)
 	if err != nil || result != want {
 		t.Fatalf("managed UninstallHook = %+v, %v, want %+v", result, err, want)
 	}
-	checkEntries(t, filepath.Dir(path), "post-checkout.pgtwig-backup")
+	checkEntries(t, filepath.Dir(path), "post-checkout.pgcheckout-backup")
 	checkFile(t, want.Backup, original)
 
 	want.Removed = false
@@ -150,8 +150,8 @@ func TestInstallHookRefusesConfiguredDirectoryAsTarget(t *testing.T) {
 
 func TestInstallHookInLinkedWorktree(t *testing.T) {
 	dir, path := initRepo(t)
-	git(t, dir, "config", "--local", "user.name", "pgtwig test")
-	git(t, dir, "config", "--local", "user.email", "pgtwig@example.invalid")
+	git(t, dir, "config", "--local", "user.name", "pgcheckout test")
+	git(t, dir, "config", "--local", "user.email", "pgcheckout@example.invalid")
 	git(t, dir, "-c", "core.hooksPath=", "commit", "--allow-empty", "-m", "initial")
 	worktree := filepath.Join(t.TempDir(), "linked")
 	git(t, dir, "-c", "core.hooksPath=", "worktree", "add", "-b", "linked", worktree)

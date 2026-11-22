@@ -41,7 +41,7 @@ func Load(cwd string, flags Overrides, lookupEnv func(string) (string, bool)) (C
 	if file.PoolSize != nil {
 		poolSize = *file.PoolSize
 	}
-	size, err := strconv.Atoi(resolve(flags.PoolSize, lookupEnv, "PGTWIG_POOL_SIZE", strconv.Itoa(poolSize)))
+	size, err := strconv.Atoi(resolve(flags.PoolSize, lookupEnv, "PGCHECKOUT_POOL_SIZE", strconv.Itoa(poolSize)))
 	if err != nil || size < 0 {
 		return Config{}, NewError(ConfigInvalid, "pool size must be a non-negative integer", "")
 	}
@@ -50,7 +50,7 @@ func Load(cwd string, flags Overrides, lookupEnv func(string) (string, bool)) (C
 	if file.Strategy != nil {
 		strategy = *file.Strategy
 	}
-	strategy = resolve(flags.Strategy, lookupEnv, "PGTWIG_STRATEGY", strategy)
+	strategy = resolve(flags.Strategy, lookupEnv, "PGCHECKOUT_STRATEGY", strategy)
 	switch strategy {
 	case "auto", "clone", "file_copy", "wal_log", "default":
 	default:
@@ -58,11 +58,11 @@ func Load(cwd string, flags Overrides, lookupEnv func(string) (string, bool)) (C
 	}
 
 	cfg := Config{
-		Base:     resolve(flags.Base, lookupEnv, "PGTWIG_BASE", file.Base),
+		Base:     resolve(flags.Base, lookupEnv, "PGCHECKOUT_BASE", file.Base),
 		PoolSize: size,
 		Strategy: strategy,
 	}
-	rawURL := resolve(flags.AdminURL, lookupEnv, "PGTWIG_ADMIN_URL", "")
+	rawURL := resolve(flags.AdminURL, lookupEnv, "PGCHECKOUT_ADMIN_URL", "")
 	if rawURL != "" {
 		cfg.AdminURL, err = ParseAdminURL(rawURL)
 	}
@@ -118,13 +118,13 @@ func discover(cwd string) (fileConfig, error) {
 		}
 	}
 	for ; ; dir = filepath.Dir(dir) {
-		path := filepath.Join(dir, ".pgtwig.json")
+		path := filepath.Join(dir, ".pgcheckout.json")
 		data, err := os.ReadFile(path)
 		switch {
 		case err == nil:
 			return decodeFile(data)
 		case !errors.Is(err, os.ErrNotExist):
-			return fileConfig{}, &Error{Code: ConfigInvalid, Message: "could not read .pgtwig.json", Cause: err}
+			return fileConfig{}, &Error{Code: ConfigInvalid, Message: "could not read .pgcheckout.json", Cause: err}
 		}
 		if dir == root {
 			return fileConfig{}, nil
@@ -135,7 +135,7 @@ func discover(cwd string) (fileConfig, error) {
 func decodeFile(data []byte) (fileConfig, error) {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(data, &fields); err != nil || fields == nil {
-		return fileConfig{}, &Error{Code: ConfigInvalid, Message: ".pgtwig.json must contain one JSON object", Cause: err}
+		return fileConfig{}, &Error{Code: ConfigInvalid, Message: ".pgcheckout.json must contain one JSON object", Cause: err}
 	}
 	var file fileConfig
 	for key, value := range fields {
@@ -148,10 +148,10 @@ func decodeFile(data []byte) (fileConfig, error) {
 		case "strategy":
 			target = &file.Strategy
 		default:
-			return fileConfig{}, NewError(ConfigInvalid, ".pgtwig.json contains an unknown key", "")
+			return fileConfig{}, NewError(ConfigInvalid, ".pgcheckout.json contains an unknown key", "")
 		}
 		if err := json.Unmarshal(value, target); err != nil || bytes.Equal(value, []byte("null")) {
-			return fileConfig{}, &Error{Code: ConfigInvalid, Message: "invalid value in .pgtwig.json", Cause: err}
+			return fileConfig{}, &Error{Code: ConfigInvalid, Message: "invalid value in .pgcheckout.json", Cause: err}
 		}
 	}
 	return file, nil

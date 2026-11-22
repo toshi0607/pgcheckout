@@ -6,10 +6,10 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/toshi0607/pgtwig/internal/config"
+	"github.com/toshi0607/pgcheckout/internal/config"
 )
 
-const managedHeader = "# managed by pgtwig; do not edit"
+const managedHeader = "# managed by pgcheckout; do not edit"
 
 func absolutePath(cwd, path string) (string, error) {
 	if !filepath.IsAbs(path) {
@@ -34,11 +34,11 @@ func readFile(path string) ([]byte, os.FileInfo, error) {
 }
 
 func unmanagedFile(path string) *config.Error {
-	return config.NewError(config.UnmanagedFile, "file is not managed by pgtwig", fmt.Sprintf("Move %q out of the way and retry.", path))
+	return config.NewError(config.UnmanagedFile, "file is not managed by pgcheckout", fmt.Sprintf("Move %q out of the way and retry.", path))
 }
 
 func writeAtomic(path, content string, mode os.FileMode) (err error) {
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".pgtwig-*")
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".pgcheckout-*")
 	if err != nil {
 		return err
 	}

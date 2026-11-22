@@ -10,7 +10,7 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/toshi0607/pgtwig/internal/config"
+	"github.com/toshi0607/pgcheckout/internal/config"
 )
 
 const hookMode = 0o755
@@ -45,8 +45,8 @@ func InstallHook(ctx context.Context, cwd string, env EnvOptions, force bool) (I
 	}
 	content := "#!/bin/sh\n" + managedHeader + "\n" + `# $3 is 1 for a branch checkout, 0 for a file checkout.
 [ "$3" = "1" ] || exit 0
-command -v pgtwig >/dev/null 2>&1 || exit 0
-pgtwig ensure` + args + ` >/dev/null || echo "pgtwig: ensure failed; the branch database was not switched" >&2
+command -v pgcheckout >/dev/null 2>&1 || exit 0
+pgcheckout ensure` + args + ` >/dev/null || echo "pgcheckout: ensure failed; the branch database was not switched" >&2
 exit 0
 `
 	path, err := hookPath(ctx, cwd)
@@ -80,7 +80,7 @@ exit 0
 		return InstallResult{}, fmt.Errorf("create local hooks directory: %w", err)
 	}
 	if unmanaged {
-		result.Backup = path + ".pgtwig-backup"
+		result.Backup = path + ".pgcheckout-backup"
 		if err := backupHook(path, result.Backup); err != nil {
 			return InstallResult{}, err
 		}
@@ -102,7 +102,7 @@ func UninstallHook(ctx context.Context, cwd string) (UninstallResult, error) {
 		return UninstallResult{}, err
 	}
 	result := UninstallResult{Hook: path}
-	backup := path + ".pgtwig-backup"
+	backup := path + ".pgcheckout-backup"
 	if _, err := os.Lstat(backup); err == nil {
 		result.Backup = backup
 	} else if !errors.Is(err, os.ErrNotExist) {

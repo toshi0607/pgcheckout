@@ -1,6 +1,6 @@
-# pgtwig 設計
+# pgcheckout 設計
 
-pgtwig は、PostgreSQL 互換のサーバーの中で開発用のデータベースを複製し、git のブランチごとに 1 つずつ割り当てる CLI である。
+pgcheckout は、PostgreSQL 互換のサーバーの中で開発用のデータベースを複製し、git のブランチごとに 1 つずつ割り当てる CLI である。
 対象は、接続文字列で届く PostgreSQL 互換のサーバー（手元の PostgreSQL、AlloyDB Omni、マネージドの AlloyDB など）に限る。
 MySQL など、サーバー内でデータベースを複製できない製品は対象にしない。
 
@@ -12,8 +12,8 @@ MySQL など、サーバー内でデータベースを複製できない製品�
 | ブランチ | ベースから複製した、開発者やエージェントが接続して使うデータベース |
 | プール | ベースから先に複製しておいた、まだ誰にも割り当てていないデータベース |
 | 世代 | ベースの内容が変わるたびに 1 増える整数。複製がどの時点のベースから作られたかを表す |
-| 管理用データベース | pgtwig が管理の SQL を実行するために接続するデータベース。ベースとは別のもの |
-| 目印 | pgtwig が管理していることを示す、データベースのコメントに書いた JSON |
+| 管理用データベース | pgcheckout が管理の SQL を実行するために接続するデータベース。ベースとは別のもの |
+| 目印 | pgcheckout が管理していることを示す、データベースのコメントに書いた JSON |
 
 ## 複製の方式
 
@@ -27,7 +27,7 @@ MySQL など、サーバー内でデータベースを複製できない製品�
 | 14 以下 | 指定なし | `STRATEGY` 句が無い |
 
 `file_copy_method` の設定に失敗したサーバーでは、`FILE_COPY` のまま複製する。
-方式は `PGTWIG_STRATEGY` で上書きできる。
+方式は `PGCHECKOUT_STRATEGY` で上書きできる。
 
 `CREATE DATABASE ... TEMPLATE` は、次の 3 つを複製しない（PostgreSQL 18.7 で確認した）。
 
@@ -35,7 +35,7 @@ MySQL など、サーバー内でデータベースを複製できない製品�
 - データベースへの権限（`GRANT ... ON DATABASE`）
 - データベースのコメント
 
-pgtwig は複製の直後に、ベースの設定と権限を複製先へ付け直す。
+pgcheckout は複製の直後に、ベースの設定と権限を複製先へ付け直す。
 コメントは複製されないので、ベースの目印がブランチへ写ることはない。
 
 ## 目印と破壊的な操作の範囲
@@ -43,7 +43,7 @@ pgtwig は複製の直後に、ベースの設定と権限を複製先へ付け�
 目印は、次の形の JSON をデータベースのコメントに書いたものである。
 
 ```json
-{"pgtwig":1,"kind":"branch","base":"app","gen":3,"branch":"feat/login","created_at":"2026-11-22T06:00:00Z","expires_at":null,"strategy":"file_copy_clone"}
+{"pgcheckout":1,"kind":"branch","base":"app","gen":3,"branch":"feat/login","created_at":"2026-11-22T06:00:00Z","expires_at":null,"strategy":"file_copy_clone"}
 ```
 
 `kind` は `base`、`branch`、`pool`、`tmp` のいずれかである。
@@ -51,7 +51,7 @@ pgtwig は複製の直後に、ベースの設定と権限を複製先へ付け�
 削除、作り直し、プールの破棄、期限切れの掃除は、目印があり、`base` が対象のベースと一致し、`kind` が `branch`、`pool`、`tmp` のいずれかであるデータベースだけに実行する。
 名前の接頭辞だけを根拠にした削除は行わない。
 ベースと管理用データベースは、どのコマンドでも削除しない。
-名前が pgtwig の規則に合うのに目印が無いデータベースは、`list` と `doctor` が `unmanaged` として報告するだけにする。
+名前が pgcheckout の規則に合うのに目印が無いデータベースは、`list` と `doctor` が `unmanaged` として報告するだけにする。
 
 ## 名前の規則
 
@@ -116,14 +116,14 @@ pgtwig は複製の直後に、ベースの設定と権限を複製先へ付け�
 
 ## 設定
 
-設定は環境変数とフラグで渡す。リポジトリに `.pgtwig.json` があれば、秘密でない値（`base`、`pool_size`、`strategy`）をそこから読む。
+設定は環境変数とフラグで渡す。リポジトリに `.pgcheckout.json` があれば、秘密でない値（`base`、`pool_size`、`strategy`）をそこから読む。
 
 | 環境変数 | 意味 |
 |---|---|
-| `PGTWIG_ADMIN_URL` | 管理用データベースへの接続文字列。無ければ `DATABASE_URL` を使わず、エラーにする |
-| `PGTWIG_BASE` | ベースの名前 |
-| `PGTWIG_POOL_SIZE` | プールの目標数。既定は 2、0 でプールを使わない |
-| `PGTWIG_STRATEGY` | 方式の上書き（`clone`、`file_copy`、`wal_log`、`default`） |
+| `PGCHECKOUT_ADMIN_URL` | 管理用データベースへの接続文字列。無ければ `DATABASE_URL` を使わず、エラーにする |
+| `PGCHECKOUT_BASE` | ベースの名前 |
+| `PGCHECKOUT_POOL_SIZE` | プールの目標数。既定は 2、0 でプールを使わない |
+| `PGCHECKOUT_STRATEGY` | 方式の上書き（`clone`、`file_copy`、`wal_log`、`default`） |
 
 `DATABASE_URL` を既定で読まないのは、アプリケーション用の接続先を管理用として誤って使うと、ベースや本番に近いデータベースへ管理の SQL を実行しうるからである。
 
@@ -139,9 +139,9 @@ pgtwig は複製の直後に、ベースの設定と権限を複製先へ付け�
 ## 構成
 
 ```
-cmd/pgtwig/        エントリポイント
+cmd/pgcheckout/        エントリポイント
 internal/cli/      引数の解釈、出力、終了コード
-internal/config/   環境変数、フラグ、.pgtwig.json
+internal/config/   環境変数、フラグ、.pgcheckout.json
 internal/naming/   スラッグとデータベース名
 internal/marker/   目印の符号化と復号
 internal/pg/       接続、複製の方式、SQL
@@ -153,7 +153,7 @@ internal/branch/   ensure、drop、reset、list、gc、pool、base の手順
 ## テスト
 
 - 単体テスト: 名前、目印、方式の選択、設定の解釈。データベースを使わない。
-- 結合テスト: ビルドタグ `integration` を付け、`PGTWIG_TEST_ADMIN_URL` が指すサーバーで実行する。未設定なら飛ばす。PostgreSQL 18 と AlloyDB Omni 17 の両方で実行する。
+- 結合テスト: ビルドタグ `integration` を付け、`PGCHECKOUT_TEST_ADMIN_URL` が指すサーバーで実行する。未設定なら飛ばす。PostgreSQL 18 と AlloyDB Omni 17 の両方で実行する。
 - 結合テストは、`CREATEDB` だけを持つロールで実行する。
 
 ## 実測（2026-11-22、Apple Silicon の Mac、1 GB のデータベース）

@@ -8,15 +8,15 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/toshi0607/pgtwig/internal/config"
-	"github.com/toshi0607/pgtwig/internal/marker"
-	"github.com/toshi0607/pgtwig/internal/pg"
+	"github.com/toshi0607/pgcheckout/internal/config"
+	"github.com/toshi0607/pgcheckout/internal/marker"
+	"github.com/toshi0607/pgcheckout/internal/pg"
 )
 
 var errDatabaseGone = errors.New("database disappeared")
 
 func unmanaged() error {
-	return config.NewError(config.UnmanagedDatabase, "database does not have the expected pgtwig marker", "")
+	return config.NewError(config.UnmanagedDatabase, "database does not have the expected pgcheckout marker", "")
 }
 
 // checkMutation revalidates the catalog row immediately before destructive SQL.
@@ -37,7 +37,7 @@ func (s *session) checkMutation(ctx context.Context, db pg.DB, expected pg.Datab
 		return unmanaged()
 	case baseChange && actual.AllowConnections != expected.AllowConnections:
 		return unmanaged()
-	case adopt && name == s.Base && actual.Marker.PGTwig == 0 && expected.Marker.PGTwig == 0:
+	case adopt && name == s.Base && actual.Marker.PGCheckout == 0 && expected.Marker.PGCheckout == 0:
 		return nil
 	}
 	m := actual.Marker

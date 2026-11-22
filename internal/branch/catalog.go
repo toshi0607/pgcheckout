@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/toshi0607/pgtwig/internal/config"
-	"github.com/toshi0607/pgtwig/internal/marker"
-	"github.com/toshi0607/pgtwig/internal/naming"
-	"github.com/toshi0607/pgtwig/internal/pg"
+	"github.com/toshi0607/pgcheckout/internal/config"
+	"github.com/toshi0607/pgcheckout/internal/marker"
+	"github.com/toshi0607/pgcheckout/internal/naming"
+	"github.com/toshi0607/pgcheckout/internal/pg"
 )
 
 type BranchInfo struct {
@@ -79,7 +79,7 @@ func (svc Service) Doctor(ctx context.Context) (DoctorResult, error) {
 	return run(ctx, svc, func(s *session) (DoctorResult, error) {
 		result := DoctorResult{
 			Server: s.Server, Pool: PoolCounts{Target: s.Config.PoolSize}, Problems: make([]config.Error, 0),
-			Note: fmt.Sprintf("advisory locks are scoped to the maintenance database; every pgtwig user of this base must use the same maintenance database (%s)", s.Maintenance),
+			Note: fmt.Sprintf("advisory locks are scoped to the maintenance database; every pgcheckout user of this base must use the same maintenance database (%s)", s.Maintenance),
 		}
 		if !s.CanCreateDB {
 			result.Problems = append(result.Problems, *config.NewError(config.InsufficientPrivilege,
@@ -125,7 +125,7 @@ func (svc Service) Doctor(ctx context.Context) (DoctorResult, error) {
 		}
 		if len(unmanaged) > 0 {
 			result.Problems = append(result.Problems, *config.NewError(config.UnmanagedDatabase,
-				"reserved database names exist without a matching pgtwig marker", "Check the unmanaged database list."))
+				"reserved database names exist without a matching pgcheckout marker", "Check the unmanaged database list."))
 		}
 		return result, nil
 	})

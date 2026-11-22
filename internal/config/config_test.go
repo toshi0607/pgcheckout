@@ -28,12 +28,12 @@ func TestLoadPrecedenceAndDiscovery(t *testing.T) {
 	}{
 		{"file", nil, Overrides{}, "file_base", 4, "wal_log", ""},
 		{"env", map[string]string{
-			"PGTWIG_BASE": "env_base", "PGTWIG_POOL_SIZE": "0", "PGTWIG_STRATEGY": "file_copy",
-			"PGTWIG_ADMIN_URL": "postgresql://localhost/env_admin",
+			"PGCHECKOUT_BASE": "env_base", "PGCHECKOUT_POOL_SIZE": "0", "PGCHECKOUT_STRATEGY": "file_copy",
+			"PGCHECKOUT_ADMIN_URL": "postgresql://localhost/env_admin",
 		}, Overrides{}, "env_base", 0, "file_copy", "env_admin"},
 		{"flag", map[string]string{
-			"PGTWIG_BASE": "env_base", "PGTWIG_POOL_SIZE": "invalid", "PGTWIG_STRATEGY": "invalid",
-			"PGTWIG_ADMIN_URL": "invalid",
+			"PGCHECKOUT_BASE": "env_base", "PGCHECKOUT_POOL_SIZE": "invalid", "PGCHECKOUT_STRATEGY": "invalid",
+			"PGCHECKOUT_ADMIN_URL": "invalid",
 		}, Overrides{Base: new("flag_base"), PoolSize: new("6"), Strategy: new("default"), AdminURL: new("postgres://localhost/flag_admin")},
 			"flag_base", 6, "default", "flag_admin"},
 	} {
@@ -128,7 +128,7 @@ func noEnv(string) (string, bool) { return "", false }
 
 func writeConfig(t *testing.T, dir, body string) {
 	t.Helper()
-	if err := os.WriteFile(filepath.Join(dir, ".pgtwig.json"), []byte(body), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, ".pgcheckout.json"), []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
 }

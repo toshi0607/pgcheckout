@@ -1,17 +1,17 @@
-# pgtwig 計画
+# pgcheckout 計画
 
 設計は `DESIGN.md`。検証コマンドはリポジトリのルートで実行する。
 
 ## Plan
 
 - [ ] S1 中核: 設定、名前、目印、方式の選択、`ensure`（直接複製）、`list`、`dsn`、`drop`、`reset`、`base create/adopt/open/close`、`doctor`
-  - 完了条件: `go build ./... && go vet ./... && go test ./...` が exit 0。`PGTWIG_TEST_ADMIN_URL=... go test -tags integration ./...` が PostgreSQL 18 で exit 0
+  - 完了条件: `go build ./... && go vet ./... && go test ./...` が exit 0。`PGCHECKOUT_TEST_ADMIN_URL=... go test -tags integration ./...` が PostgreSQL 18 で exit 0
 - [ ] S2 プール: `pool fill/status/drain`、`ensure` のプール利用と切り離した補充、`gc`、`--ttl`
-  - 完了条件: S1 と同じコマンドが exit 0。`pgtwig ensure | cat` が補充の完了を待たずに戻る
+  - 完了条件: S1 と同じコマンドが exit 0。`pgcheckout ensure | cat` が補充の完了を待たずに戻る
 - [ ] S3 git 連携: `hook install`、`ensure --env-file`
   - 完了条件: 一時リポジトリで `git checkout` 後に env ファイルの接続先が切り替わる
 - [ ] S4 AlloyDB Omni 17 で結合テスト
-  - 完了条件: Omni 17 を指す `PGTWIG_TEST_ADMIN_URL` で `go test -tags integration ./...` が exit 0
+  - 完了条件: Omni 17 を指す `PGCHECKOUT_TEST_ADMIN_URL` で `go test -tags integration ./...` が exit 0
 - [ ] S5 レビュー（`reviewer` に DESIGN.md との照合を依頼）と指摘の反映
 - [ ] S6 README と AGENTS.md（エージェント向けの使い方）
 

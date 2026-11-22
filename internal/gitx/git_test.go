@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/toshi0607/pgtwig/internal/config"
+	"github.com/toshi0607/pgcheckout/internal/config"
 )
 
 func TestBranchName(t *testing.T) {
@@ -18,7 +18,7 @@ func TestBranchName(t *testing.T) {
 	if got, err := BranchName(t.Context(), dir); err != nil || got != "topic" {
 		t.Fatalf("unborn branch = %q, %v", got, err)
 	}
-	git(t, dir, "-c", "user.name=pgtwig test", "-c", "user.email=pgtwig@example.invalid", "commit", "--allow-empty", "-m", "initial")
+	git(t, dir, "-c", "user.name=pgcheckout test", "-c", "user.email=pgcheckout@example.invalid", "commit", "--allow-empty", "-m", "initial")
 	git(t, dir, "checkout", "--detach", "HEAD")
 	if _, err := BranchName(t.Context(), dir); config.ErrorCode(err) != config.DetachedHead {
 		t.Fatalf("detached HEAD = %v, want detached_head", err)

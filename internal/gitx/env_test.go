@@ -10,19 +10,19 @@ import (
 	"testing"
 	"time"
 
-	"github.com/toshi0607/pgtwig/internal/config"
+	"github.com/toshi0607/pgcheckout/internal/config"
 )
 
 func TestWriteEnvFile(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, ".env.pgtwig")
-	opts := EnvOptions{Path: new(".env.pgtwig")}
+	path := filepath.Join(dir, ".env.pgcheckout")
+	opts := EnvOptions{Path: new(".env.pgcheckout")}
 	const url = "postgres://user:secret@localhost/app__main?sslmode=disable"
 	result, err := opts.Write(dir, url)
 	if err != nil || result != (EnvResult{EnvFile: path, EnvFileChanged: true}) {
 		t.Fatalf("Write = %+v, %v", result, err)
 	}
-	checkFile(t, path, "# managed by pgtwig; do not edit\nDATABASE_URL="+url+"\n")
+	checkFile(t, path, "# managed by pgcheckout; do not edit\nDATABASE_URL="+url+"\n")
 	if info := fileInfo(t, path); runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 		t.Errorf("mode = %o, want 600", info.Mode().Perm())
 	}
@@ -46,8 +46,8 @@ func TestWriteEnvFile(t *testing.T) {
 	if err != nil || result != (EnvResult{EnvFile: path, EnvFileChanged: true}) {
 		t.Fatalf("replacement Write = %+v, %v", result, err)
 	}
-	checkFile(t, path, "# managed by pgtwig; do not edit\n_BRANCH_URL_2="+changedURL+"\n")
-	checkEntries(t, dir, ".env.pgtwig")
+	checkFile(t, path, "# managed by pgcheckout; do not edit\n_BRANCH_URL_2="+changedURL+"\n")
+	checkEntries(t, dir, ".env.pgcheckout")
 }
 
 func TestWriteEnvRefusesUnmanagedFiles(t *testing.T) {
@@ -56,8 +56,8 @@ func TestWriteEnvRefusesUnmanagedFiles(t *testing.T) {
 	}{
 		{"unmanaged", "DATABASE_URL=keep-this\n"},
 		{"empty", ""},
-		{"header on second line", "\n# managed by pgtwig; do not edit\n"},
-		{"header with extra space", "# managed by pgtwig; do not edit \n"},
+		{"header on second line", "\n# managed by pgcheckout; do not edit\n"},
+		{"header with extra space", "# managed by pgcheckout; do not edit \n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -79,7 +79,7 @@ func TestWriteEnvRefusesUnmanagedFiles(t *testing.T) {
 func TestWriteEnvRejectsInvalidInput(t *testing.T) {
 	dir := t.TempDir()
 	const url = "postgres://localhost/app"
-	opts := EnvOptions{Path: new(".env.pgtwig")}
+	opts := EnvOptions{Path: new(".env.pgcheckout")}
 	for _, key := range []string{"", "1URL", "DATABASE-URL", "A=B", "URL\n", "あ"} {
 		opts.Key = &key
 		if _, err := opts.Write(dir, url); config.ErrorCode(err) != config.Usage {

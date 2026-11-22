@@ -47,7 +47,7 @@ var forceFlag = helpFlag{"--force", "", "Disconnect sessions before dropping the
 var terminateFlag = helpFlag{"--terminate", "", "Disconnect database sessions."}
 
 var help = helpResult{
-	Usage: "pgtwig [global flags] <command> ...",
+	Usage: "pgcheckout [global flags] <command> ...",
 	Commands: []helpCommand{
 		{"ensure", "Get or create a database for a branch.", ensureFlags, "[branch]"},
 		{"dsn", "Get the connection URL for a branch database.", nil, "[branch]"},
@@ -72,7 +72,7 @@ var help = helpResult{
 			{"--force", "", "Back up and replace an existing unmanaged hook."},
 		}), ""},
 		{"hook uninstall", "Remove the managed Git post-checkout hook.", nil, ""},
-		{"version", "Print the pgtwig version.", nil, ""},
+		{"version", "Print the pgcheckout version.", nil, ""},
 		{"help", "Show command usage.", nil, ""},
 	},
 	GlobalFlags: []helpFlag{
@@ -84,10 +84,10 @@ var help = helpResult{
 		{"--help", "", "Show usage (also -h)."},
 	},
 	Env: []helpEnv{
-		{"PGTWIG_ADMIN_URL", "Maintenance database connection URL."},
-		{"PGTWIG_BASE", "Base database name."},
-		{"PGTWIG_POOL_SIZE", "Target number of pooled copies."},
-		{"PGTWIG_STRATEGY", "Database copy strategy."},
+		{"PGCHECKOUT_ADMIN_URL", "Maintenance database connection URL."},
+		{"PGCHECKOUT_BASE", "Base database name."},
+		{"PGCHECKOUT_POOL_SIZE", "Target number of pooled copies."},
+		{"PGCHECKOUT_STRATEGY", "Database copy strategy."},
 	},
 	ExitCodes: map[string]string{"0": "success", "1": "runtime error", "2": "usage error"},
 }
@@ -119,7 +119,7 @@ func writeHelp(out io.Writer, format, command, sub string) error {
 		fmt.Fprintln(&text, "\nCommands:")
 	} else {
 		entry := result.Commands[0]
-		usage := "pgtwig [global flags] " + entry.Name
+		usage := "pgcheckout [global flags] " + entry.Name
 		if entry.args != "" {
 			usage += " " + entry.args
 		}

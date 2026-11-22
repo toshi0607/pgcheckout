@@ -10,10 +10,10 @@ import (
 	"os/exec"
 	"strconv"
 
-	"github.com/toshi0607/pgtwig/internal/branch"
-	"github.com/toshi0607/pgtwig/internal/config"
-	"github.com/toshi0607/pgtwig/internal/gitx"
-	"github.com/toshi0607/pgtwig/internal/naming"
+	"github.com/toshi0607/pgcheckout/internal/branch"
+	"github.com/toshi0607/pgcheckout/internal/config"
+	"github.com/toshi0607/pgcheckout/internal/gitx"
+	"github.com/toshi0607/pgcheckout/internal/naming"
 )
 
 func Run(ctx context.Context, args []string, stdout, stderr io.Writer, version string) int {
@@ -138,7 +138,7 @@ func writeEnsureEnv(cwd string, opts gitx.EnvOptions, ensured branch.EnsureResul
 
 func (a arguments) validateConfig(cfg config.Config) error {
 	if cfg.AdminURL == nil {
-		return config.NewError(config.ConfigMissing, "admin URL is required", "Set PGTWIG_ADMIN_URL or pass --admin-url.")
+		return config.NewError(config.ConfigMissing, "admin URL is required", "Set PGCHECKOUT_ADMIN_URL or pass --admin-url.")
 	}
 	if a.command == "base" && (a.sub == "create" || a.sub == "adopt") {
 		return naming.ValidateBase(a.pos[0])
@@ -147,7 +147,7 @@ func (a arguments) validateConfig(cfg config.Config) error {
 		if a.command == "doctor" {
 			return nil
 		}
-		return config.NewError(config.ConfigMissing, "base name is required", "Set PGTWIG_BASE or pass --base.")
+		return config.NewError(config.ConfigMissing, "base name is required", "Set PGCHECKOUT_BASE or pass --base.")
 	}
 	return naming.ValidateBase(cfg.Base)
 }
@@ -214,21 +214,21 @@ func (a arguments) branchName(ctx context.Context, cwd string) (string, error) {
 func prepareRefill(cfg config.Config) (*exec.Cmd, error) {
 	executable, err := os.Executable()
 	if err != nil {
-		return nil, fmt.Errorf("resolve pgtwig executable: %w", err)
+		return nil, fmt.Errorf("resolve pgcheckout executable: %w", err)
 	}
 	executable, err = exec.LookPath(executable)
 	if err != nil {
-		return nil, fmt.Errorf("check pgtwig executable: %w", err)
+		return nil, fmt.Errorf("check pgcheckout executable: %w", err)
 	}
 	cmd := exec.Command(executable, "pool", "fill")
 	if err := detach(cmd); err != nil {
 		return nil, err
 	}
 	cmd.Env = append(cmd.Environ(),
-		"PGTWIG_ADMIN_URL="+cfg.AdminURL.String(),
-		"PGTWIG_BASE="+cfg.Base,
-		"PGTWIG_POOL_SIZE="+strconv.Itoa(cfg.PoolSize),
-		"PGTWIG_STRATEGY="+cmp.Or(cfg.Strategy, "auto"),
+		"PGCHECKOUT_ADMIN_URL="+cfg.AdminURL.String(),
+		"PGCHECKOUT_BASE="+cfg.Base,
+		"PGCHECKOUT_POOL_SIZE="+strconv.Itoa(cfg.PoolSize),
+		"PGCHECKOUT_STRATEGY="+cmp.Or(cfg.Strategy, "auto"),
 	)
 	return cmd, nil
 }
