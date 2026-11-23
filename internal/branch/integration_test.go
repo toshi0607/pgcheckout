@@ -946,7 +946,7 @@ func TestCopyMarkerBlackholedLeavesNoUnmarkedCopy(t *testing.T) {
 		t.Fatalf("blackholed comments = %d, want 1 (ensure error: %v)", got, err)
 	}
 	// The retry marks the copy on a new connection, but the closed session cannot verify it, so the copy is discarded.
-	if err == nil || strings.Contains(err.Error(), "unmarked") || strings.Contains(err.Error(), "clean up temporary database") {
+	if config.ErrorCode(err) != config.ConnectFailed || strings.Contains(err.Error(), "unmarked") || strings.Contains(err.Error(), "clean up temporary database") {
 		t.Fatalf("ensure error = %v, want a failure after discarding the marked copy", err)
 	}
 	if tmp := f.tmpDatabases(t); len(tmp) != 0 {

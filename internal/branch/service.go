@@ -63,13 +63,30 @@ func run[T any](ctx context.Context, svc Service, fn func(*session) (T, error)) 
 			Message: "could not connect to PostgreSQL: " + message, Cause: err}
 	}
 	defer func() {
+		lost := conn.IsClosed()
 		err = databaseError(closeMaintenance(ctx, conn, err), "")
+		if lost {
+			err = connectionLost(err, adminURL)
+		}
 	}()
 	server, err := prepareMaintenance(ctx, conn, svc.Config.MaintenanceDB())
 	if err != nil {
 		return result, err
 	}
 	return fn(&session{Conn: conn, Config: svc.Config, Server: server, connect: connect})
+}
+
+func connectionLost(err error, adminURL string) error {
+	if err == nil {
+		return nil
+	}
+	if _, ok := errors.AsType[*config.Error](err); ok {
+		return err
+	}
+	message := config.RedactConnectionDetails(strings.ReplaceAll(err.Error(), adminURL, "<redacted-url>"))
+	return &config.Error{Code: config.ConnectFailed,
+		Message: "connection to PostgreSQL was lost during the operation: " + message,
+		Hint:    "Retry; pgcheckout doctor reports anything the interrupted operation left behind.", Cause: err}
 }
 
 func prepareMaintenance(ctx context.Context, conn *pgx.Conn, database string) (pg.Server, error) {

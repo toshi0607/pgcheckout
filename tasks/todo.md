@@ -178,7 +178,7 @@ c1〜c6 の修正は 2026-11-23 に `reviewer` の再レビューを受け、Cla
 | d4（Minor）付け直しは名前だけで対象を決める。同じ名前でコメントの無い他人のデータベースへ目印を付けうる | 予約した接頭辞と 32 ビットの乱数が一致する名前を、他人が同じ時間帯に作った場合だけ | 他人のデータベースが `gc` の対象になる | 見送り。頻度が実質ゼロで、その名前を作れる権限があれば目印も自分で書ける |
 | d5（Minor）`CREATE` が実行中のまま失敗を返す場合、待たずに手動削除を案内する | 複製の途中で接続が切れ、取り消し要求も届かないとき（まれ） | 手動の削除が 1 回要る。名前は失敗に出ており、`doctor` も報告する | 見送り |
 | d6（Minor）コミットの応答が失われると、`base adopt` と `base create` の失敗の内容が実際の状態と食い違いうる | コミットの瞬間に接続が切れたとき（まれ、未再現） | 再実行すると `database_exists` か変更なしになる。データは失われない | 見送り |
-| d7（Minor）SIGPIPE の扱いと子プロセスの回収に自動テストが無い | `cli` の起動まわりを変えるとき（少ない） | 補充の子プロセスが残る、出力先が閉じたときの終了が乱れる。手動で確認済み（c1、c2） | 見送り。次にその部分を変えるときに足す |
+| d7（Minor）SIGPIPE の扱いと子プロセスの回収に自動テストが無い | `cli` の起動まわりを変えるとき（少ない） | 補充の子プロセスが残る、出力先が閉じたときの終了が乱れる。手動で確認済み（c1、c2） | 直した（`TestMCPSurvivesClosedStdout`、`TestMCPRefillIsReaped`） |
 | 細かい指摘 5 件（ACL の読み取り失敗が `insufficient_privilege` になる、など） | — | 文言と重複だけで、動作は正しい | 見送り |
 
 d1〜d3 の修正（2026-11-23）:
@@ -188,5 +188,14 @@ d1〜d3 の修正（2026-11-23）:
 - `copy.go`: 付け直しで目印が付いた場合の失敗に、一時データベースの名前と、`gc` と `pool drain` で消せることを入れた。
 - 結果: PostgreSQL 18.7（`-race`）と AlloyDB Omni 17.10 で `go test -tags integration ./...` が通った。新しい 4 件は PostgreSQL 18 で 10 回、Omni で 5 回くり返して通った。
 - 修正を外したコピーで、テストが落ちることを確かめた。再試行を 1 回にすると再試行の 2 件が、取り消し後の破棄を外すと `TestCreateBaseCanceledLeavesNoBase` が、名前を入れる分岐を外すと `TestCopyRecoveryMarksAndNamesLeftover` が落ちた。
-- 残る限界: `TestCreateBaseCanceledLeavesNoBase` が通るのは、複製の直後に取り消した場合の経路である。接続の禁止から名前の付け替えまでの間の取り消しは、自動テストに無い。無応答の接続と、取り消し要求が届かない場合も、手動の確認のままである。
-- `base create` の途中で残った一時データベースは、ベースを作り直したあとでなければ `gc` と `pool drain` で消せない（どちらもベースを先に引く。コードを読んだ確認）。
+
+残っていた確認の追加（2026-11-23、コミット 4d24d3f とその次）:
+
+- `TestCreateBaseCanceledBeforeRenameLeavesNoBase`: 接続の禁止と名前の付け替えの間で取り消す。`base.go` のその位置の破棄を外したコピーでは落ちた。
+- `TestCreateBaseRecoveryLeftoverIsRemovableAfterBaseExists`: `base create` の途中で残った一時データベースは、ベースが無いあいだ `gc` も `pool drain` も `base_not_found` になり、ベースを作り直したあとの `pool drain` で消える。
+- `TestCopyMarkerBlackholedLeavesNoUnmarkedCopy`: 目印の書き込みで接続が無応答になっても、約 10 秒で失敗が返り、一時データベースは残らない。
+- `TestMCPSurvivesClosedStdout` と `TestMCPRefillIsReaped`（d7）: `ignoreSIGPIPE()` と `refill.Wait()` をそれぞれ外すと落ちることを確かめた。
+- 接続が切れたときの失敗が `internal` の `could not complete the operation` になる件を直した。操作の終わりに接続が閉じていて、失敗が未分類のままなら、`connect_failed` にして原因の文言を入れる（`service.go` の `connectionLost`）。
+- 結果: PostgreSQL 18.7（`-race`）と AlloyDB Omni 17.10 で `go test -tags integration ./...` が通った。
+- 自動テストに無いもの: 複製の実行中に接続が切れ、取り消し要求も届かない場合。複製が終わる時刻との競争になり、決定的なテストにできない。2026-11-23 にプロキシで手動の確認をしている。
+- Codex は 2026-11-23 に利用上限に達した（再開は 11-24 0:22）。追加のテスト 5 件は、代替の経路どおり Opus のエージェントが書いた。

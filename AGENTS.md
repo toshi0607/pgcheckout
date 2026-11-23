@@ -47,6 +47,7 @@ pgcheckout drop feat/x
 | Code | Meaning | What to do |
 |---|---|---|
 | `config_missing` | admin URL or base not set | set `PGCHECKOUT_ADMIN_URL` / `PGCHECKOUT_BASE` |
+| `connect_failed` | could not connect, or the connection was lost during the operation | check the server, retry; run `pgcheckout doctor` to see what an interrupted operation left |
 | `base_not_found`, `base_not_marked` | no usable base | `pgcheckout base create <name> --from <db>` |
 | `base_open` | the base is being edited | wait, or run `pgcheckout base close` if you opened it |
 | `database_in_use` | sessions are connected | close them, or retry with `--force` / `--terminate` |

@@ -53,6 +53,22 @@ func TestConnectErrorRedactsDSN(t *testing.T) {
 	}
 }
 
+func TestConnectionLost(t *testing.T) {
+	const adminURL = "postgres://alice:example-secret@localhost/app"
+	if err := connectionLost(nil, adminURL); err != nil {
+		t.Fatalf("no error mapped to %v", err)
+	}
+	mapped := config.NewError(config.Canceled, "operation canceled", "")
+	if err := connectionLost(mapped, adminURL); err != error(mapped) {
+		t.Fatalf("mapped error replaced by %v", err)
+	}
+	err := connectionLost(fmt.Errorf("look up database on %s: conn closed", adminURL), adminURL)
+	if config.ErrorCode(err) != config.ConnectFailed || strings.Contains(err.Error(), "secret") ||
+		err.Error() != "connection to PostgreSQL was lost during the operation: look up database on <redacted-url>: conn closed" {
+		t.Fatalf("lost connection mapped to %s, %v", config.ErrorCode(err), err)
+	}
+}
+
 func TestCleanupWarningPreservesSuccess(t *testing.T) {
 	var warnings []string
 	cleanupErr := errors.New("release claim lock: connection closed")
