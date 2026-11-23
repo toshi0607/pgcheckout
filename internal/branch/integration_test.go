@@ -4,10 +4,12 @@ package branch
 
 import (
 	"context"
+	"errors"
 	"os"
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -104,6 +106,29 @@ func (f *fixture) ensure(t *testing.T, name string) EnsureResult {
 		t.Fatalf("ensure %s: %v", name, err)
 	}
 	return r
+}
+
+func (f *fixture) viaProxy(t *testing.T, hook func(string) testpg.QueryFault) (Service, *testpg.FaultProxy) {
+	t.Helper()
+	svc := f.svc
+	adminURL, proxy := testpg.StartFaultProxy(t, svc.Config.AdminURL, hook)
+	svc.Config.AdminURL = adminURL
+	return svc, proxy
+}
+
+func (f *fixture) tmpDatabases(t *testing.T) []pg.Database {
+	t.Helper()
+	dbs, err := pg.Databases(t.Context(), f.admin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tmp []pg.Database
+	for _, d := range dbs {
+		if strings.HasPrefix(d.Name, f.svc.Config.Base+"__tmp_") {
+			tmp = append(tmp, d)
+		}
+	}
+	return tmp
 }
 
 func (f *fixture) fill(t *testing.T, size int) {
@@ -217,6 +242,96 @@ func TestCopyReplicatesSettingsAndACL(t *testing.T) {
 		if err != nil || !grantOption {
 			t.Fatalf("expected grantable CONNECT for copied role, got %v, %v", grantOption, err)
 		}
+	}
+}
+
+func TestCopyMarkerRetrySucceeds(t *testing.T) {
+	f := newFixture(t, nil)
+	prefix := `COMMENT ON DATABASE "` + f.svc.Config.Base + "__tmp_"
+	var first atomic.Bool
+	svc, proxy := f.viaProxy(t, func(sql string) testpg.QueryFault {
+		if strings.HasPrefix(sql, prefix) && !first.Swap(true) {
+			return testpg.InjectQueryError
+		}
+		return testpg.ForwardQuery
+	})
+	result, err := svc.Ensure(t.Context(), "retry_marker", EnsureOptions{NoRefill: true})
+	if got := proxy.Injected(testpg.InjectQueryError); got != 1 {
+		t.Fatalf("injected comment errors = %d, want 1 (ensure error: %v)", got, err)
+	}
+	if err != nil || result.Source != "copy" {
+		t.Fatalf("ensure after marker retry: source=%q, err=%v", result.Source, err)
+	}
+	if tmp := f.tmpDatabases(t); len(tmp) != 0 {
+		t.Fatalf("ensure left temporary databases: %+v", tmp)
+	}
+}
+
+func TestCopyMarkerRetryExhausted(t *testing.T) {
+	f := newFixture(t, nil)
+	prefix := `COMMENT ON DATABASE "` + f.svc.Config.Base + "__tmp_"
+	svc, proxy := f.viaProxy(t, func(sql string) testpg.QueryFault {
+		if strings.HasPrefix(sql, prefix) {
+			return testpg.InjectQueryError
+		}
+		return testpg.ForwardQuery
+	})
+	_, err := svc.Ensure(t.Context(), "exhaust_marker", EnsureOptions{NoRefill: true})
+	if got := proxy.Injected(testpg.InjectQueryError); got != 3 {
+		t.Fatalf("injected comment errors = %d, want 3 (ensure error: %v)", got, err)
+	}
+	tmp := f.tmpDatabases(t)
+	if len(tmp) != 1 || tmp[0].Comment != nil {
+		t.Fatalf("want one temporary database with a NULL comment, got %+v", tmp)
+	}
+	name := tmp[0].Name
+	if err == nil || !strings.Contains(err.Error(), name) || !strings.Contains(err.Error(), "must be dropped manually") {
+		t.Fatalf("ensure error = %v, want manual cleanup for %q", err, name)
+	}
+	list, err := f.svc.List(t.Context())
+	if err != nil || !slices.Equal(list.Unmanaged, []string{name}) {
+		t.Fatalf("list unmanaged: %v, %v", list.Unmanaged, err)
+	}
+	doctor, err := f.svc.Doctor(t.Context())
+	if err != nil || !slices.Equal(doctor.Unmanaged, []string{name}) {
+		t.Fatalf("doctor unmanaged: %v, %v", doctor.Unmanaged, err)
+	}
+}
+
+func TestCopyRecoveryMarksAndNamesLeftover(t *testing.T) {
+	f := newFixture(t, nil)
+	base := f.svc.Config.Base
+	prefix := `CREATE DATABASE "` + base + "__tmp_"
+	var first atomic.Bool
+	svc, proxy := f.viaProxy(t, func(sql string) testpg.QueryFault {
+		if strings.HasPrefix(sql, prefix) && !first.Swap(true) {
+			return testpg.DropQueryReply
+		}
+		return testpg.ForwardQuery
+	})
+	_, err := svc.Ensure(t.Context(), "recover_marker", EnsureOptions{NoRefill: true})
+	if got := proxy.Injected(testpg.DropQueryReply); got != 1 {
+		t.Fatalf("dropped CREATE replies = %d, want 1 (ensure error: %v)", got, err)
+	}
+	tmp := f.tmpDatabases(t)
+	if len(tmp) != 1 || !tmp[0].Marker.ValidFor(base) || tmp[0].Marker.Kind != marker.Tmp {
+		t.Fatalf("want one managed temporary database, got %+v", tmp)
+	}
+	name := tmp[0].Name
+	problem, ok := errors.AsType[*config.Error](err)
+	if !ok {
+		t.Fatalf("ensure error = %v, want *config.Error for %q", err, name)
+	}
+	if !strings.Contains(problem.Message, name) || !strings.Contains(problem.Message, "marked for cleanup") ||
+		!strings.Contains(problem.Hint, "pool drain") {
+		t.Fatalf("ensure message = %q, hint = %q, want marked database %q and a pool drain hint", problem.Message, problem.Hint, name)
+	}
+	drained, err := f.svc.PoolDrain(t.Context())
+	if err != nil || !slices.Equal(drained.Dropped, []string{name}) {
+		t.Fatalf("drain recovered copy: %+v, %v", drained, err)
+	}
+	if tmp := f.tmpDatabases(t); len(tmp) != 0 {
+		t.Fatalf("pool drain left temporary databases: %+v", tmp)
 	}
 }
 
@@ -702,18 +817,27 @@ func TestCreateBaseCanceledLeavesNoBase(t *testing.T) {
 	newFixture(t, func(t *testing.T, f *fixture) {
 		name := f.svc.Config.Base
 		ctx, cancel := context.WithCancel(t.Context())
-		cancel()
-		if _, err := f.svc.BaseCreate(ctx, name, f.source, false); config.ErrorCode(err) != config.Canceled {
+		defer cancel()
+		prefix := `COMMENT ON DATABASE "` + name + "__tmp_"
+		var hits atomic.Int64
+		svc, _ := f.viaProxy(t, func(sql string) testpg.QueryFault {
+			if strings.HasPrefix(sql, prefix) && hits.Add(1) == 1 {
+				cancel()
+			}
+			return testpg.ForwardQuery
+		})
+		_, err := svc.BaseCreate(ctx, name, f.source, false)
+		if got := hits.Load(); got != 1 {
+			t.Fatalf("temporary marker hook hits = %d, want 1 (base create error: %v)", got, err)
+		}
+		if config.ErrorCode(err) != config.Canceled {
 			t.Fatalf("canceled create = %v, want canceled", err)
 		}
-		dbs, err := pg.Databases(t.Context(), f.admin)
-		if err != nil {
-			t.Fatal(err)
+		if f.exists(t, name) {
+			t.Errorf("canceled create left base database %q", name)
 		}
-		for _, d := range dbs {
-			if d.Name == name || (strings.HasPrefix(d.Name, name+"__tmp_") && !d.Marker.ValidFor(name)) {
-				t.Errorf("canceled create left database %q", d.Name)
-			}
+		if tmp := f.tmpDatabases(t); len(tmp) != 0 {
+			t.Errorf("canceled create left temporary databases: %+v", tmp)
 		}
 	})
 }

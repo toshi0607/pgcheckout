@@ -33,8 +33,18 @@ func (s *session) copyFromBase(ctx context.Context, source pg.Database, gen int,
 	m.Strategy = strategy
 	if err != nil {
 		if _, serverError := errors.AsType[*pgconn.PgError](err); !serverError {
-			if recoveryErr := s.recoverCopyMarker(ctx, name, m); recoveryErr != nil {
-				err = unmarkedCopyError(name, err, recoveryErr)
+			switch left, recoveryErr := s.recoverCopyMarker(ctx, name, m); {
+			case recoveryErr != nil:
+				return copyResult{}, unmarkedCopyError(name, err, recoveryErr)
+			case left:
+				mapped := databaseError(err, "")
+				status := fmt.Sprintf("temporary database %q was left behind and is marked for cleanup", name)
+				return copyResult{}, &config.Error{
+					Code:    config.ErrorCode(mapped),
+					Message: config.RedactConnectionDetails(mapped.Error() + "; " + status),
+					Hint:    "pgcheckout gc drops it one hour after it was created; pgcheckout pool drain drops it now together with the pool. Both need the base to exist.",
+					Cause:   err,
+				}
 			}
 		}
 		return copyResult{}, err
@@ -88,10 +98,11 @@ func (s *session) markNewCopy(ctx context.Context, name string, m marker.Marker)
 	return err
 }
 
-func (s *session) recoverCopyMarker(ctx context.Context, name string, m marker.Marker) error {
+func (s *session) recoverCopyMarker(ctx context.Context, name string, m marker.Marker) (bool, error) {
 	cleanup, cancel := cleanupContext(ctx)
 	defer cancel()
-	return s.withCleanupConn(cleanup, func(conn *pgx.Conn) error {
+	var left bool
+	err := s.withCleanupConn(cleanup, func(conn *pgx.Conn) error {
 		var originalBackendActive bool
 		if conn != s.Conn {
 			// A lost client connection can leave CREATE running on its original backend.
@@ -104,8 +115,10 @@ func (s *session) recoverCopyMarker(ctx context.Context, name string, m marker.M
 		if err == nil && !found && originalBackendActive {
 			return errors.New("the original copy session is still active")
 		}
+		left = found && err == nil
 		return err
 	})
+	return left, err
 }
 
 func markUncommentedCopy(ctx context.Context, conn *pgx.Conn, name string, m marker.Marker) (bool, error) {
