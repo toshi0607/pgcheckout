@@ -842,6 +842,118 @@ func TestCreateBaseCanceledLeavesNoBase(t *testing.T) {
 	})
 }
 
+func TestCreateBaseCanceledBeforeRenameLeavesNoBase(t *testing.T) {
+	newFixture(t, func(t *testing.T, f *fixture) {
+		name := f.svc.Config.Base
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		prefix := `ALTER DATABASE "` + name + "__tmp_"
+		const suffix = " WITH ALLOW_CONNECTIONS false"
+		var hits atomic.Int64
+		svc, _ := f.viaProxy(t, func(sql string) testpg.QueryFault {
+			if strings.HasPrefix(sql, prefix) && strings.HasSuffix(sql, suffix) && hits.Add(1) == 1 {
+				cancel()
+			}
+			return testpg.ForwardQuery
+		})
+		_, err := svc.BaseCreate(ctx, name, f.source, false)
+		if got := hits.Load(); got != 1 {
+			t.Fatalf("connection lockout hook hits = %d, want 1 (base create error: %v)", got, err)
+		}
+		if config.ErrorCode(err) != config.Canceled {
+			t.Fatalf("canceled create = %v, want canceled", err)
+		}
+		if f.exists(t, name) {
+			t.Errorf("canceled create left base database %q", name)
+		}
+		if tmp := f.tmpDatabases(t); len(tmp) != 0 {
+			t.Errorf("canceled create left temporary databases: %+v", tmp)
+		}
+	})
+}
+
+func TestCreateBaseRecoveryLeftoverIsRemovableAfterBaseExists(t *testing.T) {
+	var leftover string
+	// newFixture creates the base through the real URL after this function returns.
+	f := newFixture(t, func(t *testing.T, f *fixture) {
+		base := f.svc.Config.Base
+		// The subtest ends the fault proxy, so the backend holding the lost session's claim lock disconnects.
+		passed := t.Run("lost CREATE reply", func(t *testing.T) {
+			prefix := `CREATE DATABASE "` + base + "__tmp_"
+			var first atomic.Bool
+			svc, proxy := f.viaProxy(t, func(sql string) testpg.QueryFault {
+				if strings.HasPrefix(sql, prefix) && !first.Swap(true) {
+					return testpg.DropQueryReply
+				}
+				return testpg.ForwardQuery
+			})
+			_, err := svc.BaseCreate(t.Context(), base, f.source, false)
+			if got := proxy.Injected(testpg.DropQueryReply); got != 1 {
+				t.Fatalf("dropped CREATE replies = %d, want 1 (base create error: %v)", got, err)
+			}
+			tmp := f.tmpDatabases(t)
+			if len(tmp) != 1 || !tmp[0].Marker.ValidFor(base) || tmp[0].Marker.Kind != marker.Tmp {
+				t.Fatalf("want one managed temporary database, got %+v", tmp)
+			}
+			leftover = tmp[0].Name
+			problem, ok := errors.AsType[*config.Error](err)
+			if !ok || !strings.Contains(problem.Message, leftover) || !strings.Contains(problem.Message, "marked for cleanup") {
+				t.Fatalf("base create error = %v, want *config.Error naming %q as marked for cleanup", err, leftover)
+			}
+		})
+		if !passed {
+			t.FailNow()
+		}
+		if f.exists(t, base) {
+			t.Fatalf("failed create left base database %q", base)
+		}
+		if _, err := f.svc.GC(t.Context(), false); config.ErrorCode(err) != config.BaseNotFound {
+			t.Fatalf("gc without base = %v, want base_not_found", err)
+		}
+		if _, err := f.svc.PoolDrain(t.Context()); config.ErrorCode(err) != config.BaseNotFound {
+			t.Fatalf("pool drain without base = %v, want base_not_found", err)
+		}
+		if !f.exists(t, leftover) {
+			t.Fatalf("leftover %q was removed without a base", leftover)
+		}
+	})
+	drained, err := f.svc.PoolDrain(t.Context())
+	if err != nil || !slices.Equal(drained.Dropped, []string{leftover}) {
+		t.Fatalf("drain leftover after base create: %+v, %v", drained, err)
+	}
+	if tmp := f.tmpDatabases(t); len(tmp) != 0 {
+		t.Fatalf("pool drain left temporary databases: %+v", tmp)
+	}
+}
+
+func TestCopyMarkerBlackholedLeavesNoUnmarkedCopy(t *testing.T) {
+	f := newFixture(t, nil)
+	prefix := `COMMENT ON DATABASE "` + f.svc.Config.Base + "__tmp_"
+	var first atomic.Bool
+	svc, proxy := f.viaProxy(t, func(sql string) testpg.QueryFault {
+		if strings.HasPrefix(sql, prefix) && !first.Swap(true) {
+			return testpg.BlackholeConnection
+		}
+		return testpg.ForwardQuery
+	})
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+	defer cancel()
+	_, err := svc.Ensure(ctx, "blackholed_marker", EnsureOptions{NoRefill: true})
+	if ctx.Err() != nil {
+		t.Fatalf("ensure did not return within 60 s: %v", err)
+	}
+	if got := proxy.Injected(testpg.BlackholeConnection); got != 1 {
+		t.Fatalf("blackholed comments = %d, want 1 (ensure error: %v)", got, err)
+	}
+	// The retry marks the copy on a new connection, but the closed session cannot verify it, so the copy is discarded.
+	if err == nil || strings.Contains(err.Error(), "unmarked") || strings.Contains(err.Error(), "clean up temporary database") {
+		t.Fatalf("ensure error = %v, want a failure after discarding the marked copy", err)
+	}
+	if tmp := f.tmpDatabases(t); len(tmp) != 0 {
+		t.Fatalf("ensure left temporary databases: %+v", tmp)
+	}
+}
+
 func TestPoolClaimReportsReplicationWarnings(t *testing.T) {
 	f := newFixture(t, nil)
 	execTestSQL(t, f.admin, "ALTER DATABASE "+pg.Identifier(f.svc.Config.Base)+` SET search_path TO "schema/with/slashes"`)

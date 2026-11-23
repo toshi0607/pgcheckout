@@ -26,13 +26,14 @@ const (
 	ForwardQuery QueryFault = iota
 	InjectQueryError
 	DropQueryReply
+	BlackholeConnection
 )
 
 type FaultProxy struct {
 	t        *testing.T
 	hook     func(string) QueryFault
 	hookMu   sync.Mutex
-	injected [DropQueryReply + 1]atomic.Int64
+	injected [BlackholeConnection + 1]atomic.Int64
 }
 
 func StartFaultProxy(t *testing.T, adminURL *url.URL, hook func(string) QueryFault) (*url.URL, *FaultProxy) {
@@ -91,6 +92,7 @@ type proxySession struct {
 	client, server net.Conn
 	clientWrite    sync.Mutex
 	dropReply      atomic.Bool
+	blackhole      atomic.Bool
 }
 
 func (p *FaultProxy) serve(ctx context.Context, client net.Conn, upstream string) {
@@ -141,7 +143,7 @@ func (p *FaultProxy) serve(ctx context.Context, client net.Conn, upstream string
 		defer closeClient()
 		p.report("relay server messages", p.relayResponses(session))
 	})
-	p.report("relay client messages", p.relayQueries(input, session))
+	p.report("relay client messages", p.relayQueries(ctx, input, session))
 	closeClient()
 	if session.dropReply.Load() {
 		// Leave the original backend connected while recovery uses a new session.
@@ -151,7 +153,7 @@ func (p *FaultProxy) serve(ctx context.Context, client net.Conn, upstream string
 	responses.Wait()
 }
 
-func (p *FaultProxy) relayQueries(input *bufio.Reader, session *proxySession) error {
+func (p *FaultProxy) relayQueries(ctx context.Context, input *bufio.Reader, session *proxySession) error {
 	for {
 		packet, err := readProxyPacket(input, true)
 		if err != nil {
@@ -171,6 +173,12 @@ func (p *FaultProxy) relayQueries(input *bufio.Reader, session *proxySession) er
 				continue
 			case DropQueryReply:
 				session.dropReply.Store(true)
+			case BlackholeConnection:
+				session.blackhole.Store(true)
+				p.injected[BlackholeConnection].Add(1)
+				// Hold both sockets open without relaying, like a network path that stopped delivering packets.
+				<-ctx.Done()
+				return nil
 			}
 		}
 		if _, err := session.server.Write(packet); err != nil {
@@ -189,6 +197,9 @@ func (p *FaultProxy) relayResponses(session *proxySession) error {
 		if session.dropReply.Load() && (packet[0] == 'C' || packet[0] == 'E') {
 			p.injected[DropQueryReply].Add(1)
 			return nil
+		}
+		if session.blackhole.Load() {
+			continue
 		}
 		if err := session.writeClient(packet); err != nil {
 			return err
