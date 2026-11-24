@@ -29,6 +29,8 @@
 - [x] README のフックの説明と `go install` の置き場所を直した（コミット 75da718）
 - [x] MCP サーバー（S7 として実施）
 - [x] GitHub への公開（2026-11-25 にトシの OK。公開リポジトリ `toshi0607/pgcheckout`）
+- [x] 実クライアントから MCP サーバーを呼ぶ（2026-11-25）
+  - 証跡: Claude Code 2.1.316 を `--mcp-config` と `--strict-mcp-config` で起動した。サーバーは `connected` になり、ツール 8 件が見えた。`doctor`、`ensure`（`feature/mcp-check`）、`list` がどれも失敗なしで返り、`ensure` は `source: "copy"`、57 ミリ秒だった。PostgreSQL 18.7 の側でも、ブランチ 1 件とプール 2 件の目印を確かめた。クライアントの設定には何も残していない
 
 結合テストの環境は片付けた。再開するときは、次の 2 つを用意する。
 
