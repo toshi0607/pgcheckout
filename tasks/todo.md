@@ -222,3 +222,27 @@ d1〜d3 の修正（2026-11-23）:
 - 「明示的なモデルに書き直して」は、文書と TLA+ の仕様として書き直す意味に取った。Go のコードを状態機械へ書き換える読み方もあるが、変更の量が数倍になるので採らなかった
 - TLA+ の仕様は、Codex へ渡さずに主セッションで書いた。仕様は設計の成果物であり、TLC の結果を見ながら直す往復が要るため
 - `tla2tools.jar`（v1.7.4、公式リリース）は、利用者の承認を得て作業用の一時フォルダへダウンロードした。リポジトリには入れていない
+
+### ベースの作り直しの修正（2026-11-24）
+
+依頼は「`spec/` と記録のコミット」と「ベースの作り直しの問題の修正」の両方。
+
+- [x] `spec/` と記録のコミット（`22f7853`）
+- [x] 修正。`base create` と `base adopt` は、同じベース名のプールとブランチに残る世代の最大値 + 1 から始める（`internal/branch/base.go` の `firstGen`）。目印の形式と、世代を比べる箇所は変えていない
+- [x] 結合テスト 2 件（`TestBaseRecreatedStartsAfterLeftoverGen`、`TestBaseAdoptStartsAfterLeftoverGen`）。修正を外すと 2 件とも落ちることを確かめた
+  - 証拠: `go build`、`go vet`、`go vet -tags integration`、`go test ./...`、`gofmt -l internal` が exit 0。`go test -tags integration ./...` が PostgreSQL 18.7（`-race`）と AlloyDB Omni 17.10 で exit 0。新しい 2 件と `TestCreateBaseRecoveryLeftoverIsRemovableAfterBaseExists` は PostgreSQL 18 で 5 回くり返して通った
+- [x] 実機での再現手順のやり直し（PostgreSQL 18.7）。作り直したベースは世代 2、`ensure b2` は `source: copy`、`stale: false` で新しい内容、`list` は `b1` を `stale: true`、`pool status` は前のプールを `stale: 1` と数えた
+- [x] モデルの修正と TLC の全設定の再実行。28 設定（違反なしを期待する 13、違反を期待する 15）がすべて期待どおりで、`spec/check.sh` は exit 0。`external` は 2,522,533 状態、`external-faults` は 33,309,473 状態。既存の 11 設定の状態数は修正の前と同じ
+- [x] 対照実験。開始の世代を 1 に戻すと `external` が `Fresh` に違反する
+
+判断:
+
+- 目印にベースの OID を入れる案は採らなかった。目印の形式が変わり、古い目印の扱いと、世代を比べるすべての箇所の変更が要る。世代の開始値を変える案は、問題の場面でだけ挙動が変わる
+- 数える対象はプールとブランチだけにした。`tmp` も数えると、`base create` の失敗で残った `tmp` だけで次のベースが世代 2 になり、既存のテストと案内文の挙動が変わる。`tmp` は、作ったプロセスが OID の比較（`ensure.go:133`、`pool.go:122`）を通らなければ割り当てられない
+- 実装は `codex-sol` に渡した。数える対象を絞る 3 行と、Codex が足した結合テストの共通部分の変更の取り消しは、主セッションで行った
+
+扱っていないこと:
+
+- 目印が付いたままのベースが戻る場合（名前を変えて戻す、コメントごと復元する）。`base adopt` は何も変えずに受け入れるので、世代が重なりうる。モデルも検査していない
+- 前のベースから作った `tmp` が、作り直したベースより大きい世代で残る場合。割り当てられることは無いが、`pool drain` でだけ消える
+- `reset` がブランチを消したあとで失敗しうる件は、変更していない

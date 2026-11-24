@@ -36,6 +36,20 @@ func baseInfo(db pg.Database) BaseInfo {
 	return BaseInfo{Name: db.Name, Gen: db.Marker.Gen, Open: db.Marker.IsOpen(), AllowConnections: db.AllowConnections}
 }
 
+func (s *session) firstGen(ctx context.Context) (int, error) {
+	dbs, err := s.managedDatabases(ctx)
+	if err != nil {
+		return 0, err
+	}
+	var highest int
+	for _, db := range dbs {
+		if db.Marker.Kind == marker.Pool || db.Marker.Kind == marker.Branch {
+			highest = max(highest, db.Marker.Gen)
+		}
+	}
+	return highest + 1, nil
+}
+
 func (svc Service) BaseCreate(ctx context.Context, name, from string, terminate bool) (BaseResult, error) {
 	if err := naming.ValidateBase(name); err != nil {
 		return BaseResult{}, err
@@ -67,12 +81,16 @@ func (svc Service) BaseCreate(ctx context.Context, name, from string, terminate 
 			if err != nil {
 				return err
 			}
+			gen, err := s.firstGen(ctx)
+			if err != nil {
+				return err
+			}
 			if terminate {
 				if err := pg.Terminate(ctx, s.Conn, from); err != nil {
 					return databaseError(err, "")
 				}
 			}
-			copied, err := s.copyFromBase(ctx, source, 1, strategy)
+			copied, err := s.copyFromBase(ctx, source, gen, strategy)
 			if err != nil {
 				return databaseError(err, "Use --terminate to disconnect source database sessions.")
 			}
@@ -98,7 +116,7 @@ func (svc Service) BaseCreate(ctx context.Context, name, from string, terminate 
 			if err := ctx.Err(); err != nil {
 				return s.discardCopy(ctx, copied.database, err)
 			}
-			m := marker.New(marker.Base, name, 1)
+			m := marker.New(marker.Base, name, gen)
 			transition, cancel = cleanupContext(ctx)
 			err = s.renameManaged(transition, copied.database, name, m)
 			cancel()
@@ -106,7 +124,7 @@ func (svc Service) BaseCreate(ctx context.Context, name, from string, terminate 
 				return s.discardCopy(ctx, copied.database, databaseError(err, ""))
 			}
 			result = BaseResult{
-				BaseInfo: BaseInfo{Name: name, Gen: 1}, Changed: true,
+				BaseInfo: BaseInfo{Name: name, Gen: gen}, Changed: true,
 				Strategy: copied.database.Marker.Strategy, ElapsedMS: &copied.elapsed, Warnings: copied.warnings,
 			}
 			return nil
@@ -143,7 +161,11 @@ func (svc Service) BaseAdopt(ctx context.Context, name string, terminate bool) (
 				result.BaseInfo = baseInfo(db)
 				return nil
 			}
-			m = marker.New(marker.Base, name, 1)
+			gen, err := s.firstGen(ctx)
+			if err != nil {
+				return err
+			}
+			m = marker.New(marker.Base, name, gen)
 			if err := s.closeBase(ctx, db, m, terminate, true); err != nil {
 				return err
 			}

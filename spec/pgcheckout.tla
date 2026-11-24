@@ -54,6 +54,12 @@ Closed   == Marked /\ ~Openish
 Closing  == Marked /\ base.open /\ ~base.allow
 
 ReadyPool == {c \in copies : c.kind = "pool" /\ c.gen = base.gen}
+
+(* firstGen, base.go: a new base starts one above every generation still stamped on a pool or branch database. *)
+MarkedGens == {c.gen : c \in {x \in copies : x.kind = "pool"}}
+              \cup {branchDb[b].gen : b \in {x \in Branches : branchDb[x].ex}}
+FirstGen == IF MarkedGens = {} THEN 1
+            ELSE 1 + CHOOSE g \in MarkedGens : \A h \in MarkedGens : h <= g
 Running(p) == pc[p] \notin {"idle", "done"}
 Quiescent == \A p \in Procs : ~Running(p)
 Bad(p) == canc[p] \/ ~conn[p]                \* SQL on the session connection with the caller's context fails
@@ -184,7 +190,7 @@ CopyCreate(p) ==
     LET isCreate == op[p] = "basecreate"
         srcOK == isCreate \/ (base.st # "absent" /\ sessions = 0)
         new(k) == [id |-> nextId, kind |-> k,
-                   gen |-> IF isCreate THEN 1 ELSE seen[p].gen,
+                   gen |-> seen[p].gen,
                    content |-> IF isCreate THEN 0 ELSE base.content,
                    old |-> FALSE]
     IN
@@ -352,7 +358,7 @@ FClaim2(p) ==
                     /\ UNCHANGED <<dnext, claim, fillLock>>
                     /\ Step(p, "f_claim1")
 
-(* base open: base.go:166-185 *)
+(* base open: base.go:188-207 *)
 BaseOpen(p) ==
     /\ pc[p] = "bo"
     /\ UNCHANGED <<sessions, nextOid, sealed, copies, nextId, branchDb, late, seen, cid, dnext, rdrop>>
@@ -362,7 +368,7 @@ BaseOpen(p) ==
             /\ IF ~Marked THEN UNCHANGED base /\ Finish(p, "no_base")
                ELSE base' = [base EXCEPT !.open = TRUE, !.allow = TRUE] /\ Finish(p, "ok")
 
-(* base close, first write: base.go:171-189 and closeBase, base.go:208-222 *)
+(* base close, first write: base.go:193-211 and closeBase, base.go:230-244 *)
 BC1(p) ==
     /\ pc[p] = "bc1"
     /\ UNCHANGED <<nextOid, sealed, copies, nextId, branchDb, late, cid, dnext, rdrop>>
@@ -377,7 +383,7 @@ BC1(p) ==
                     /\ See(p)
                     /\ Step(p, "bc2")
 
-(* base adopt, first write: base.go:118-156 and closeBase with adopt *)
+(* base adopt, first write: base.go:136-178 and closeBase with adopt *)
 BA1(p) ==
     /\ pc[p] = "ba1"
     /\ UNCHANGED <<nextOid, sealed, copies, nextId, branchDb, late, cid, dnext, rdrop>>
@@ -389,11 +395,11 @@ BA1(p) ==
                ELSE IF Marked THEN UNCHANGED <<base, sessions, seen>> /\ Finish(p, "noop")
                ELSE /\ claim' = p /\ UNCHANGED fillLock
                     /\ sessions' = IF flag[p] THEN 0 ELSE sessions
-                    /\ base' = [base EXCEPT !.st = "marked", !.open = TRUE, !.allow = FALSE, !.gen = 1]
-                    /\ seen' = [seen EXCEPT ![p] = [gen |-> 1, oid |-> base.oid]]
+                    /\ base' = [base EXCEPT !.st = "marked", !.open = TRUE, !.allow = FALSE, !.gen = FirstGen]
+                    /\ seen' = [seen EXCEPT ![p] = [gen |-> FirstGen, oid |-> base.oid]]
                     /\ Step(p, "bc2")
 
-(* checkClosedSessions: base.go:284-315 *)
+(* checkClosedSessions: base.go:306-337 *)
 BC2(p) ==
     /\ pc[p] = "bc2"
     /\ UNCHANGED <<base, nextOid, sealed, copies, nextId, branchDb, late, seen, cid, dnext, rdrop>>
@@ -405,7 +411,7 @@ BC2(p) ==
 
 BaseMatch(p) == Closing /\ SeenCurrent(p)    \* checkMutation, mutation.go:24-53
 
-(* finishBaseClose, final write, then the stale pool sweep: base.go:233-252, 194-201, gc.go:39-64 *)
+(* finishBaseClose, final write, then the stale pool sweep: base.go:255-274, 194-201, gc.go:39-64 *)
 BC3(p) ==
     LET ng == IF op[p] = "adopt" THEN base.gen ELSE base.gen + 1
         swept == {c \in copies : ~(c.kind \in {"pool", "tmp"} /\ c.gen < ng)}
@@ -422,7 +428,7 @@ BC3(p) ==
        ELSE /\ UNCHANGED <<base, sealed, copies, claim, fillLock>>
             /\ StepR(p, "brestore", "error")
 
-(* finishBaseClose, restore: base.go:256-281.  Runs on a new connection, without the lock, after a loss. *)
+(* finishBaseClose, restore: base.go:278-303.  Runs on a new connection, without the lock, after a loss. *)
 BRestore(p) ==
     /\ pc[p] = "brestore"
     /\ UNCHANGED <<sessions, nextOid, sealed, copies, nextId, branchDb, late, seen, cid, dnext, rdrop>>
@@ -438,7 +444,7 @@ BRestore(p) ==
           /\ stuck' = TRUE
           /\ Finish(p, "restore_failed")
 
-(* base create: base.go:39-116.  The claim lock is held from the first lookup to the rename. *)
+(* base create: base.go:53-134.  The claim lock is held from the first lookup to the rename. *)
 BCR1(p) ==
     /\ pc[p] = "bcr1"
     /\ UNCHANGED <<base, sessions, nextOid, sealed, copies, nextId, branchDb, late, cid, dnext, rdrop>>
@@ -447,7 +453,7 @@ BCR1(p) ==
        ELSE /\ claim = NoProc
             /\ IF base.st # "absent" THEN UNCHANGED seen /\ Finish(p, "exists")
                ELSE /\ claim' = p /\ UNCHANGED fillLock
-                    /\ seen' = [seen EXCEPT ![p] = [gen |-> 1, oid |-> 0]]
+                    /\ seen' = [seen EXCEPT ![p] = [gen |-> FirstGen, oid |-> 0]]
                     /\ Step(p, "create")
 
 BCR2(p) ==
@@ -456,10 +462,10 @@ BCR2(p) ==
     /\ UNCHANGED <<Params, Counters, Ghosts>>
     /\ IF ~Bad(p) /\ base.st = "absent" /\ OwnCopy(p) # {}
        THEN \E c \in OwnCopy(p) :
-              /\ base' = [st |-> "marked", open |-> FALSE, allow |-> FALSE, gen |-> 1,
+              /\ base' = [st |-> "marked", open |-> FALSE, allow |-> FALSE, gen |-> c.gen,
                           content |-> c.content, oid |-> nextOid]
               /\ nextOid' = nextOid + 1
-              /\ sealed' = [sealed EXCEPT ![1] = c.content]
+              /\ sealed' = [sealed EXCEPT ![c.gen] = c.content]
               /\ copies' = copies \ {c}
               /\ cid' = [cid EXCEPT ![p] = 0]
               /\ UNCHANGED dnext
@@ -681,5 +687,7 @@ ProbeRestoreFailed == \A p \in Procs : res[p] # "restore_failed"
 ProbeMaybe     == \A p \in Procs : res[p] # "error_maybe"
 ProbeUnmarked  == \A p \in Procs : res[p] # "error_unmarked"
 ProbeOrphan    == \A c \in copies : ~(c.kind = "unmarked" /\ c.id \in excused)
+ProbeRecreatedFresh == ~(base.oid > 1 /\ Closed /\ \E b \in Branches : branchDb[b].ex /\ branchDb[b].gen = base.gen)
+ProbeRecreatedStale == ~(base.oid > 1 /\ Marked /\ \E b \in Branches : branchDb[b].ex /\ branchDb[b].gen < base.gen)
 ProbeUnlockedRestore == \A p \in Procs : ~(pc[p] = "brestore" /\ ~conn[p] /\ claim \notin {NoProc, p})
 =============================================================================

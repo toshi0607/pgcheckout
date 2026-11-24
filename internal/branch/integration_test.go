@@ -466,6 +466,45 @@ func TestBaseOpenCloseBumpsGenAndDropsStalePool(t *testing.T) {
 	}
 }
 
+func TestBaseRecreatedStartsAfterLeftoverGen(t *testing.T) {
+	f := newFixture(t, func(t *testing.T, f *fixture) {
+		source := connectTestDB(t, f.svc.Config.DatabaseURL(f.source))
+		execTestSQL(t, source, "CREATE TABLE public.items (id integer PRIMARY KEY)")
+		execTestSQL(t, source, "INSERT INTO public.items VALUES (1)")
+		if err := source.Close(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+	})
+	f.ensure(t, "b1")
+	f.fill(t, 1)
+	name := f.svc.Config.Base
+	execTestSQL(t, f.admin, "DROP DATABASE "+pg.Identifier(name))
+	source := connectTestDB(t, f.svc.Config.DatabaseURL(f.source))
+	execTestSQL(t, source, "UPDATE public.items SET id = 2")
+	if err := source.Close(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	recreated, err := f.svc.BaseCreate(t.Context(), name, f.source, false)
+	if err != nil || recreated.Gen != 2 {
+		t.Fatalf("recreate base: %+v, %v", recreated, err)
+	}
+	if old := f.ensure(t, "b1"); old.Source != "existing" || !old.Stale {
+		t.Fatalf("ensure b1: source=%q, stale=%t", old.Source, old.Stale)
+	}
+	fresh := f.ensure(t, "b2")
+	if fresh.Source != "copy" || fresh.Stale {
+		t.Fatalf("ensure b2: source=%q, stale=%t", fresh.Source, fresh.Stale)
+	}
+	branch := connectTestDB(t, fresh.URL)
+	var ids []int32
+	if err := branch.QueryRow(t.Context(), "SELECT array_agg(id ORDER BY id) FROM public.items").Scan(&ids); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(ids, []int32{2}) {
+		t.Fatalf("b2 row IDs = %v, want [2]", ids)
+	}
+}
+
 func TestEnsureFailsWhileBaseOpen(t *testing.T) {
 	f := newFixture(t, nil)
 	if _, err := f.svc.BaseOpen(t.Context()); err != nil {
@@ -761,6 +800,22 @@ func TestBaseAdoptIdempotent(t *testing.T) {
 	after := f.database(t, f.source)
 	if after.OID != before.OID || after.AllowConnections || after.Marker.IsOpen() || !after.Marker.ValidFor(f.source) {
 		t.Fatalf("adopt did not preserve the original database: %+v", after)
+	}
+}
+
+func TestBaseAdoptStartsAfterLeftoverGen(t *testing.T) {
+	f := newFixture(t, nil)
+	f.ensure(t, "b1")
+	f.fill(t, 1)
+	name := f.svc.Config.Base
+	execTestSQL(t, f.admin, "DROP DATABASE "+pg.Identifier(name))
+	execTestSQL(t, f.admin, "CREATE DATABASE "+pg.Identifier(name)+" TEMPLATE template0")
+	adopted, err := f.svc.BaseAdopt(t.Context(), name, false)
+	if err != nil || adopted.Gen != 2 {
+		t.Fatalf("adopt replacement base: %+v, %v", adopted, err)
+	}
+	if old := f.ensure(t, "b1"); old.Source != "existing" || !old.Stale {
+		t.Fatalf("ensure b1: source=%q, stale=%t", old.Source, old.Stale)
 	}
 }
 
