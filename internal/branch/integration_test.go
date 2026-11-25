@@ -1022,3 +1022,34 @@ func TestPoolClaimReportsReplicationWarnings(t *testing.T) {
 		t.Fatalf("claim: source=%q, warnings=%v", claimed.Source, claimed.Warnings)
 	}
 }
+
+func TestGCDropsAgedTmpFromNewerGeneration(t *testing.T) {
+	f := newFixture(t, nil)
+	base := f.svc.Config.Base
+	gen := f.database(t, base).Marker.Gen + 1
+	var now time.Time
+	if err := f.admin.QueryRow(t.Context(), "SELECT now()").Scan(&now); err != nil {
+		t.Fatal(err)
+	}
+	create := func(createdAt time.Time) string {
+		name, err := naming.TmpDB(base)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.admin.Exec(t.Context(), "CREATE DATABASE "+pg.Identifier(name)); err != nil {
+			t.Fatal(err)
+		}
+		m := marker.New(marker.Tmp, base, gen)
+		m.CreatedAt = createdAt
+		if err := pg.Comment(t.Context(), f.admin, name, m); err != nil {
+			t.Fatal(err)
+		}
+		return name
+	}
+	aged, recent := create(now.Add(-2*time.Hour)), create(now)
+
+	result, err := f.svc.GC(t.Context(), false)
+	if err != nil || !slices.Equal(result.Dropped, []string{aged}) || f.exists(t, aged) || !f.exists(t, recent) {
+		t.Fatalf("gc = %+v, %v; aged exists=%t, recent exists=%t", result, err, f.exists(t, aged), f.exists(t, recent))
+	}
+}

@@ -67,7 +67,7 @@ A copy is created with `CREATE DATABASE ... TEMPLATE`, and its name changes as t
 | `tmp` → base | `base create` | See the base table above | `base.go:119-125` |
 | `tmp` → absent | The operation that created it | It could not be published | `mutation.go:158-176` |
 | `tmp` → absent | `base close`, `gc` | The generation is older than the base | `gc.go:58-59` |
-| `tmp` → absent | `gc` | The generation is the same and more than 1 hour has passed since creation | `gc.go:59` |
+| `tmp` → absent | `gc` | The generation is the same as or newer than the base, and more than 1 hour has passed since creation | `gc.go:59` |
 | `tmp` → absent | `pool drain` | Unconditional | `pool.go:183-185` |
 | pool → branch | `ensure`, `reset` | Inside the lock: the generation is the same as the base | `ensure.go:183-205` |
 | pool → absent | `base close`, `gc` | The generation is older than the base | `gc.go:56-57` |
@@ -144,7 +144,7 @@ Both are session-level locks, and the key is built from the base name and the pu
 | Target | Condition | Effect | Code |
 |---|---|---|---|
 | Branch | `expires_at` passes | Becomes a target of `gc` deletion | `gc.go:55` |
-| `tmp` | More than 1 hour has passed since creation | Becomes a target of `gc` deletion even if the generation is the same | `gc.go:50`, `gc.go:59` |
+| `tmp` | More than 1 hour has passed since creation | Becomes a target of `gc` deletion even if the generation is the same as or newer than the base | `gc.go:50`, `gc.go:59` |
 
 Time is read from the server's `now()` (`gc.go:46`).
 
@@ -288,10 +288,11 @@ In the model, the configurations `external` and `external-faults` were confirmed
 
 When the base is replaced during a copy, the OID comparison already discarded the copy before the fix (`ensure.go:133`, `pool.go:122`). A `tmp` or an unmarked copy does not become a pool copy or a branch unless the process that created it passes this comparison, so they are not included in the first-generation calculation.
 
-This fix does not cover 2 cases.
+This fix does not cover 1 case.
 
 - A base that comes back with its marker still attached. A base that was renamed and put back, or one restored together with its comment, is accepted by `base adopt` without any change (`base.go:154-163`). The generation stays as written in the marker, so it can overlap with the remaining copies. The model's external recreation produces only unmarked databases, so this case is not checked.
-- A `tmp` made from the previous base remains with a marker whose generation is greater than or equal to that of the recreated base. This happens when the creating process crashes before discarding the copy through the OID comparison. This `tmp` is never assigned. If its generation is the same as the base, `gc` deletes it after 1 hour, and if it is greater than the base, only `pool drain` deletes it (`gc.go:58-59`, `pool.go:184`).
+
+A `tmp` made from the previous base can remain with a marker whose generation is greater than or equal to that of the recreated base. This happens when the creating process crashes before discarding the copy through the OID comparison. This `tmp` is never assigned. `gc` also deletes a `tmp` whose generation is the same as or newer than the base 1 hour after creation (`gc.go:58-59`). Previously, only `pool drain` deleted a `tmp` whose generation was greater than the base.
 
 ### `reset` can fail after deleting the branch
 
