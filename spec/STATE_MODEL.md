@@ -65,15 +65,15 @@ A copy is created with `CREATE DATABASE ... TEMPLATE`, and its name changes as t
 | `tmp` → branch | `ensure`, `reset` | Inside the lock: the base OID and generation are the same as when the copy started, the base is closed, and the branch does not exist yet | `ensure.go:117-156` |
 | `tmp` → pool | `pool fill` | Inside the lock: the base OID and generation are the same, and the base is closed | `pool.go:117-143` |
 | `tmp` → base | `base create` | See the base table above | `base.go:129-135` |
-| `tmp` → absent | The operation that created it | It could not be published | `mutation.go:158-176` |
+| `tmp` → absent | The operation that created it | It could not be published | `mutation.go:247-265` |
 | `tmp` → absent | `base close`, `gc` | The generation is older than the base | `gc.go:58-59` |
 | `tmp` → absent | `gc` | The generation is the same as or newer than the base, and more than 1 hour has passed since creation | `gc.go:59` |
 | `tmp` → absent | `pool drain` | Unconditional | `pool.go:183-185` |
-| pool → branch | `ensure`, `reset` | Inside the lock: the generation is the same as the base | `ensure.go:183-205` |
+| pool → branch | `ensure`, `reset` | Inside the lock: the generation is the same as the base | `ensure.go:174-190` |
 | pool → absent | `base close`, `gc` | The generation differs from the base | `gc.go:56-57` |
 | pool → absent | `pool drain` | Unconditional | `pool.go:183-185` |
 
-The rename and the marker rewrite go into one transaction, and the transaction begins by checking the catalog again (`mutation.go:122-135`). A deletion also checks the catalog immediately beforehand (`mutation.go:70`). No transition deletes a database that has no marker.
+The rename and the marker rewrite go into one transaction, and the transaction begins by checking the catalog again (`mutation.go:123-136`). A deletion also checks the catalog immediately beforehand (`mutation.go:71`). No transition deletes a database that has no marker.
 
 A `tmp` can be deleted by `base close`, `gc`, or `pool drain` in another process even while the operation that created it is still alive. The side whose copy was deleted learns at rename time that the database does not exist, and starts over from copying (`ensure.go:145-147`, `pool.go:135-136`).
 
@@ -82,10 +82,11 @@ A `tmp` can be deleted by `base close`, `gc`, or `pool drain` in another process
 | Transition | Operation that causes it | Condition | Code |
 |---|---|---|---|
 | absent → present | `ensure`, `reset` | Rename from the pool or from `tmp` | Table above |
-| present → absent | `drop`, `reset` | The marker's `branch` matches | `lifecycle.go:99-112` |
+| present → absent | `drop` | The marker's `branch` matches | `lifecycle.go:247-260` |
+| present → present (replaced) | `reset` | Inside the lock: the base is closed and a replacement of the base's generation is ready. The old database becomes a `tmp` | `mutation.go:146-224` |
 | present → absent | `gc` | `expires_at` has passed | `gc.go:54-55` |
 
-No transition rewrites the generation or content of an existing branch. A branch with an old generation is only reported as `stale: true` (`ensure.go:223`).
+No transition rewrites the generation or content of an existing branch. A branch with an old generation is only reported as `stale: true` (`ensure.go:236`).
 
 ## 4. Operation steps
 
@@ -98,7 +99,7 @@ An operation that spans multiple statements moves through the following position
 | | `mark` | Write the marker | Outside | `copy.go:52` |
 | | `e_claim2` | Check again and rename | Inside | `ensure.go:117-156` |
 | | `discard` | Delete the copy that was not used | Outside | `ensure.go:157-164` |
-| `reset` | `r1` | Delete the branch. The rest is the same as `ensure` | Inside | `lifecycle.go:76-88` |
+| `reset` | `r1` | Confirm that the base is closed. The rest follows `ensure`, except that an existing branch is replaced in 1 transaction and the old database is deleted in `discard` | Inside | `lifecycle.go:102-206`, `mutation.go:146-224` |
 | `pool fill` | `f_lock` | Try the `fill` lock | — | `pool.go:55` |
 | | `f_claim1` | Count the pool | Inside | `pool.go:78-90` |
 | | `create`, `mark` | Same as `ensure` | Outside | `pool.go:99` |
@@ -122,11 +123,11 @@ An operation that spans multiple statements moves through the following position
 | State | How it is entered | Behavior afterward | Code |
 |---|---|---|---|
 | connected | Start of the operation | — | `service.go:56` |
-| canceled | Cancellation by the caller, a deadline | Statements that use the caller's context fail. Cleanup continues in a separate context with a 5-second deadline | `service.go:189-191` |
+| canceled | Cancellation by the caller, a deadline | Statements that use the caller's context fail. Cleanup continues in a separate context with a 5-second deadline | `service.go:189-195` |
 | disconnected | Loss of the connection | Statements that use the original connection fail. Cleanup runs on a new connection | `service.go:120-135` |
 | finished | Completion, crash | No cleanup after a crash | — |
 
-Cleanup means three things: deleting the copy (`discardCopy`), the write that restores the base, and re-attaching the marker. Cancellation is checked explicitly just before statements that change state. There are 9 such places: before the rename (`ensure.go:138`, `ensure.go:188`, `pool.go:128`, `base.go:126`), before blocking connections (`base.go:111`, `base.go:249`), before returning a copy (`copy.go:69`), and before counting connections and before incrementing the generation (`base.go:272`, `base.go:279`). Writes after the check use a separate context, so cancellation does not stop them.
+Cleanup means three things: deleting the copy (`discardCopy`), the write that restores the base, and re-attaching the marker. Cancellation is checked explicitly just before statements that change state. There are 9 such places: before the rename (`ensure.go:138`, `ensure.go:176`, `pool.go:128`, `base.go:126`), before blocking connections (`base.go:111`, `base.go:249`), before returning a copy (`copy.go:69`), and before counting connections and before incrementing the generation (`base.go:272`, `base.go:279`). Writes after the check use a separate context, so cancellation does not stop them.
 
 `CREATE DATABASE` can keep running on the server after the client gives up. If, from another connection, the original backend still appears to be running, the copy can appear later, so the error includes the name (`copy.go:106-117`).
 
@@ -134,10 +135,10 @@ Cleanup means three things: deleting the copy (`discardCopy`), the write that re
 
 | Lock | How it is acquired | What it protects | Code |
 |---|---|---|---|
-| `claim` | Wait and acquire | The base marker, branch names, and deletion of the pool and `tmp` | `service.go:221-224` |
+| `claim` | Wait and acquire | The base marker, branch names, and deletion of the pool and `tmp` | `service.go:225-228` |
 | `fill` | Try, and finish if not acquired | That only one `pool fill` runs at a time | `pool.go:55`, `pool.go:68-70` |
 
-Both are session-level locks, and the key is built from the base name and the purpose (`service.go:194-195`). When the connection drops, the server releases the lock. For that reason, the cleanup of a process that lost its connection runs on a new connection without holding the lock. That this cleanup does not break anything when it overlaps with another process's intermediate state is ensured by checking the catalog just before the write (`mutation.go:24-53`).
+Both are session-level locks, and the key is built from the base name and the purpose (`service.go:198-199`). When the connection drops, the server releases the lock. For that reason, the cleanup of a process that lost its connection runs on a new connection without holding the lock. That this cleanup does not break anything when it overlaps with another process's intermediate state is ensured by checking the catalog just before the write (`mutation.go:25-54`).
 
 ## Time-based transitions
 
@@ -205,7 +206,8 @@ The properties checked in the TLA+ specification are listed below. The names are
 | `SealedImmutable` | Once a generation is decided, its content does not change. A base whose content changed is always closed with a new generation |
 | `BaseKept` | pgcheckout does not delete the base |
 | `GenMonotonic` | The base's generation does not decrease |
-| `BranchStable` | The generation and content of an existing branch are not rewritten |
+| `BranchStable` | The generation and content of an existing branch are not rewritten, except when `reset` replaces it with a copy of the current base |
+| `BranchKept` | A branch disappears only through `drop` or `gc` |
 
 ## What the model omits
 
@@ -253,14 +255,14 @@ Conditions in the specification were removed one at a time, and TLC was confirme
 | The check, inside the second lock of `ensure`, of whether the base is open | `ensure.go:130` | `Fresh` |
 | The OID and generation comparison inside the second lock of `pool fill` | `pool.go:122` | `Fresh` |
 | The recount of connections in `base close` | `base.go:275` | `BaseProtected` |
-| The catalog check just before the final write of `base close` | `mutation.go:145` | `MarkerAgrees` |
+| The catalog check just before the final write of `base close` | `mutation.go:234` | `MarkerAgrees` |
 | The generation update in `base close` | `base.go:284-284` | `SealedImmutable` |
 | Mutual exclusion of the `fill` lock | `pool.go:55` | `PoolBound` |
-| Deleting a copy that was not used | `mutation.go:158-176` | `NoSilentLeak` |
+| Deleting a copy that was not used | `mutation.go:247-265` | `NoSilentLeak` |
 | Including the name of a left-behind `tmp` in the error | `copy.go:39-47` | `NoSilentLeak` |
 | Releasing the lock when the connection drops | Server behavior | `MutexOK` |
-| The catalog check just before the write that restores the base, which runs without holding the lock | `base.go:296`, `mutation.go:145` | `MarkerAgrees` |
-| Deleting a copy that was not used (configurations with crashes) | `mutation.go:158-176` | `NoSilentLeak` |
+| The catalog check just before the write that restores the base, which runs without holding the lock | `base.go:296`, `mutation.go:234` | `MarkerAgrees` |
+| Deleting a copy that was not used (configurations with crashes) | `mutation.go:247-265` | `NoSilentLeak` |
 | The first-generation calculation of `base create` and `base adopt` (always set to 1) | `base.go:39-61` | `Fresh` (configuration `external`) |
 | The next-generation calculation of `base close` (always the base's generation plus 1) | `base.go:219-223` | `Fresh` (configuration `reentry`) |
 | The check, inside the first lock of `ensure`, of whether the base is open | `ensure.go:89-91` | No violation |
@@ -284,7 +286,7 @@ In the model, with the specification where the generation always starts from 1, 
 
 It was also reproduced on PostgreSQL 18.7. Running `base create`, `pool fill`, `ensure b1`, `DROP DATABASE app`, `base create` with different content, and `ensure b2` in that order, `ensure b2` returned `source: "pool"` and `stale: false`, and its content was the content from before the recreation. `list` showed both branches as `stale: false`.
 
-In the fix, `base create` and `base adopt` start from a generation equal to the maximum generation among the remaining pool copies and branches, plus 1 (`base.go:39-61`). The marker format and the places that compare generations (`ensure.go:184`, `ensure.go:223`) are unchanged. After the fix, the same sequence gives the following result. The recreated base becomes generation 2, `ensure b2` returns the new content with `source: "copy"` and `stale: false`, and `list` shows `b1` as `stale: true`. The pool copies of the previous base are counted as old in `pool status` and become targets of `gc` deletion.
+In the fix, `base create` and `base adopt` start from a generation equal to the maximum generation among the remaining pool copies and branches, plus 1 (`base.go:39-61`). The marker format and the places that compare generations (`ensure.go:175`, `ensure.go:236`) are unchanged. After the fix, the same sequence gives the following result. The recreated base becomes generation 2, `ensure b2` returns the new content with `source: "copy"` and `stale: false`, and `list` shows `b1` as `stale: true`. The pool copies of the previous base are counted as old in `pool status` and become targets of `gc` deletion.
 
 In the model, the configurations `external` and `external-faults` were confirmed not to violate `Fresh`, `FreshCurrent`, and `NoFutureGen`. If the first generation is set back to 1, `external` violates `Fresh`.
 
@@ -302,14 +304,23 @@ The fix has 3 rules.
 
 1. `base create`, `base adopt` and `base close` take the maximum over the generations recorded on pool copies, branches, and any base marker for this base that sits on a database with another name (`base.go:39-60`).
 2. `base close` writes that maximum, or the base's own generation if it is greater, plus 1 (`base.go:219-223`).
-3. A copy is current only when its generation equals the base's. Any other generation is stale: it is shown as `stale`, never assigned, and deleted by `gc` if it is a pool copy (`ensure.go:223`, `catalog.go:51`, `gc.go:57`, `pool.go:203-207`).
+3. A copy is current only when its generation equals the base's. Any other generation is stale: it is shown as `stale`, never assigned, and deleted by `gc` if it is a pool copy (`ensure.go:236`, `catalog.go:51`, `gc.go:57`, `pool.go:203-207`).
 
 In the model, the configuration `reentry` was confirmed not to violate `Fresh` and `FreshCurrent`. If `base close` is set back to the base's generation plus 1, `reentry` violates `Fresh`. If a branch whose generation is greater than the base's is treated as current, as it was before, `reentry` violates `FreshCurrent`. Within the bounds of `reentry`, removing the renamed-away base from the maximum in rule 1 produced no violation. That part is covered by the integration test `TestParkedBaseKeepsGenerationsApart`, not by the model.
 
 1 case is outside both the fix and the model. If the base is renamed away and back while a copy that started from it is still running, and another database held the base's name when `CREATE DATABASE` read its template, the copy has the other database's content and still passes the OID comparison. `CREATE DATABASE` names its template, so pgcheckout cannot tell which database the copy read. The model excludes this sequence explicitly in `ExternalUnpark`.
 
-### `reset` can fail after deleting the branch
+### `reset` could fail after deleting the branch (fixed)
 
-`reset` deletes the branch inside the lock, releases the lock, and recreates it by the same steps as `ensure` (`lifecycle.go:76-92`). If `base open` comes in during that time, the recreation fails with `base_open`, and the branch stays absent. Cancellation and connection loss lead to the same state.
+Before the fix, `reset` deleted the branch inside the lock, released the lock, and recreated it by the same steps as `ensure`. If `base open` came in during that time, the recreation failed with `base_open`, and the branch stayed absent. Cancellation, connection loss, and a failed copy led to the same state. The model showed this sequence, and the integration test `TestResetKeepsBranchWhenCopyFails` reproduces it on a real server with a failed copy.
 
-The configuration `expect-reset-atomic` shows this sequence. No data is lost, and closing the base and then running `ensure` restores the original state. This sequence was confirmed by reading the code. It has not been reproduced on a real server.
+After the fix, `reset` obtains the replacement first and replaces the branch in 1 transaction (`lifecycle.go:70-245`, `mutation.go:146-224`).
+
+1. Inside the first lock, it confirms that the base is closed. If the branch does not exist, the rest is the same as `ensure`. Without `--force`, it stops with `database_in_use` when a session is connected to the branch.
+2. It takes a pool copy of the base's generation. If there is none, it releases the lock, makes a copy, and inside the second lock compares the base OID and generation again, as `ensure` does.
+3. In 1 transaction, it checks the catalog rows of both databases, renames the old database to a `tmp` name and writes a `tmp` marker with generation 0 on it, renames the replacement to the branch name, and writes the branch marker.
+4. After releasing the lock, it deletes the old database. If that fails, the result carries a warning with the database name. Generation 0 is older than every base generation, so `gc` and `base close` delete it without waiting 1 hour.
+
+A failure before the transaction commits leaves the branch as it was and consumes no pool copy. `ALTER DATABASE ... RENAME` fails while a session is connected, after waiting about 5 seconds, so `--force` disconnects the sessions and retries up to 5 times. 2 renames and 2 marker writes committing or rolling back together in 1 transaction was confirmed on PostgreSQL 18.7.
+
+In the model, the property `BranchKept` (a branch disappears only through `drop` or `gc`) holds in every configuration that checks action properties, including those with cancellation, connection loss, and crashes. If `reset` is set back to deleting the branch first, `union` violates `BranchKept`.

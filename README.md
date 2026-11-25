@@ -105,7 +105,7 @@ To recreate one, use `pgcheckout reset`.
 | `dsn [branch]` | Returns the connection URL |
 | `list` | Lists the base, branches, and pool |
 | `drop [branch]` | Deletes the branch. If connections remain, `--force` is required |
-| `reset [branch]` | Deletes the branch and recreates it |
+| `reset [branch]` | Replaces the branch with a fresh copy of the base. The old database stays until the new one is in place |
 | `pool fill` / `pool status` / `pool drain` | Refills, reports the status of, and discards the pool |
 | `gc` | Deletes expired branches and pools from other generations |
 | `doctor` | Reports the state of the server, privileges, and base |

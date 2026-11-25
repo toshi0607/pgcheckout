@@ -913,6 +913,195 @@ func TestResetRecreatesFromCurrentBase(t *testing.T) {
 	}
 }
 
+func TestResetKeepsBranchWhenCopyFails(t *testing.T) {
+	f := newFixture(t, nil)
+	f.svc.Config.PoolSize = 0
+	first := f.ensure(t, "topic")
+	old := f.database(t, first.Database)
+	prefix := `CREATE DATABASE "` + f.svc.Config.Base + "__tmp_"
+	svc, proxy := f.viaProxy(t, func(sql string) testpg.QueryFault {
+		if strings.HasPrefix(sql, prefix) {
+			return testpg.InjectQueryError
+		}
+		return testpg.ForwardQuery
+	})
+	_, err := svc.Reset(t.Context(), "topic", false, EnsureOptions{NoRefill: true})
+	if got := proxy.Injected(testpg.InjectQueryError); got != 1 || err == nil {
+		t.Fatalf("reset after %d injected CREATE errors: %v", got, err)
+	}
+	if current := f.database(t, first.Database); current.OID != old.OID || current.Marker != old.Marker {
+		t.Fatalf("failed reset changed the branch: before=%+v, after=%+v", old, current)
+	}
+	if tmp := f.tmpDatabases(t); len(tmp) != 0 {
+		t.Fatalf("failed reset left temporary databases: %+v", tmp)
+	}
+}
+
+func TestResetSwapsInPoolCopy(t *testing.T) {
+	f := newFixture(t, nil)
+	first := f.ensure(t, "topic")
+	old := f.database(t, first.Database)
+	f.fill(t, 1)
+	conn := connectTestDB(t, first.URL)
+	execTestSQL(t, conn, "CREATE TABLE public.reset_branch_only (id integer)")
+	if err := conn.Close(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+
+	reset, err := f.svc.Reset(t.Context(), "topic", false, EnsureOptions{NoRefill: true})
+	if err != nil || reset.Source != "pool" || !reset.Reset || !reset.Created || reset.Database != first.Database || len(reset.Warnings) != 0 {
+		t.Fatalf("pool reset: source=%q, reset=%t, created=%t, database=%q, warnings=%v, err=%v",
+			reset.Source, reset.Reset, reset.Created, reset.Database, reset.Warnings, err)
+	}
+	f.checkResetReplacement(t, old)
+	branch := connectTestDB(t, reset.URL)
+	var tableExists bool
+	if err := branch.QueryRow(t.Context(), "SELECT to_regclass('public.reset_branch_only') IS NOT NULL").Scan(&tableExists); err != nil || tableExists {
+		t.Fatalf("branch-only table after reset: exists=%t, err=%v", tableExists, err)
+	}
+}
+
+func TestResetInUseKeepsBranchWithoutForce(t *testing.T) {
+	f := newFixture(t, nil)
+	first := f.ensure(t, "topic")
+	old := f.database(t, first.Database)
+	f.fill(t, 1)
+	held := connectTestDB(t, first.URL)
+	opts := EnsureOptions{NoRefill: true}
+	_, err := f.svc.Reset(t.Context(), "topic", false, opts)
+	if problem, ok := errors.AsType[*config.Error](err); !ok || problem.Code != config.DatabaseInUse || problem.Hint != dropInUseHint(false) {
+		t.Fatalf("reset of in-use branch: %v", err)
+	}
+	if current := f.database(t, first.Database); current.OID != old.OID || current.Marker != old.Marker {
+		t.Fatalf("in-use reset changed the branch: before=%+v, after=%+v", old, current)
+	}
+	if pool, err := f.svc.PoolStatus(t.Context()); err != nil || pool.Ready != 1 {
+		t.Fatalf("pool after in-use reset: %+v, %v", pool, err)
+	}
+	if tmp := f.tmpDatabases(t); len(tmp) != 0 {
+		t.Fatalf("in-use reset left temporary databases: %+v", tmp)
+	}
+
+	reset, err := f.svc.Reset(t.Context(), "topic", true, opts)
+	if err != nil || reset.Source != "pool" || !reset.Reset || !reset.Created {
+		t.Fatalf("forced reset: source=%q, reset=%t, created=%t, err=%v", reset.Source, reset.Reset, reset.Created, err)
+	}
+	f.checkResetReplacement(t, old)
+	if err := held.Ping(t.Context()); err == nil {
+		t.Fatal("forced reset left the original branch session connected")
+	}
+}
+
+func TestResetCopiesWhenPoolIsEmpty(t *testing.T) {
+	f := newFixture(t, nil)
+	f.svc.Config.PoolSize = 0
+	first := f.ensure(t, "topic")
+	old := f.database(t, first.Database)
+	reset, err := f.svc.Reset(t.Context(), "topic", false, EnsureOptions{NoRefill: true})
+	if err != nil || reset.Source != "copy" || !reset.Reset || !reset.Created {
+		t.Fatalf("copy reset: source=%q, reset=%t, created=%t, err=%v", reset.Source, reset.Reset, reset.Created, err)
+	}
+	f.checkResetReplacement(t, old)
+}
+
+func TestResetOfMissingBranchCreatesIt(t *testing.T) {
+	f := newFixture(t, nil)
+	reset, err := f.svc.Reset(t.Context(), "topic", false, EnsureOptions{NoRefill: true})
+	if err != nil || !reset.Created || !reset.Reset || !f.exists(t, reset.Database) {
+		t.Fatalf("reset of missing branch: created=%t, reset=%t, database=%q, err=%v", reset.Created, reset.Reset, reset.Database, err)
+	}
+}
+
+func TestResetRollsBackFailedSwap(t *testing.T) {
+	for _, source := range []string{"pool", "copy"} {
+		t.Run(source, func(t *testing.T) {
+			f := newFixture(t, nil)
+			first := f.ensure(t, "topic")
+			old := f.database(t, first.Database)
+			var pooled pg.Database
+			if source == "pool" {
+				f.fill(t, 1)
+				pool, err := f.svc.PoolStatus(t.Context())
+				if err != nil || len(pool.Databases) != 1 {
+					t.Fatalf("pool before reset: %+v, %v", pool, err)
+				}
+				pooled = f.database(t, pool.Databases[0].Name)
+			} else {
+				f.svc.Config.PoolSize = 0
+			}
+			prefix := "COMMENT ON DATABASE " + pg.Identifier(first.Database) + " IS "
+			svc, proxy := f.viaProxy(t, func(sql string) testpg.QueryFault {
+				if strings.HasPrefix(sql, prefix) {
+					return testpg.InjectQueryError
+				}
+				return testpg.ForwardQuery
+			})
+			_, err := svc.Reset(t.Context(), "topic", false, EnsureOptions{NoRefill: true})
+			if got := proxy.Injected(testpg.InjectQueryError); got != 1 || err == nil {
+				t.Fatalf("reset after %d injected branch comment errors: %v", got, err)
+			}
+			if current := f.database(t, old.Name); current.OID != old.OID || current.Marker != old.Marker {
+				t.Fatalf("rolled-back reset changed the branch: before=%+v, after=%+v", old, current)
+			}
+			if source == "pool" {
+				if current := f.database(t, pooled.Name); current.OID != pooled.OID || current.Marker != pooled.Marker {
+					t.Fatalf("rolled-back reset changed the pool copy: before=%+v, after=%+v", pooled, current)
+				}
+			}
+			if tmp := f.tmpDatabases(t); len(tmp) != 0 {
+				t.Fatalf("rolled-back reset left temporary databases: %+v", tmp)
+			}
+		})
+	}
+}
+
+func TestResetWarnsWhenOldDatabaseCannotBeDropped(t *testing.T) {
+	f := newFixture(t, nil)
+	first := f.ensure(t, "topic")
+	old := f.database(t, first.Database)
+	f.fill(t, 1)
+	prefix := `DROP DATABASE "` + f.svc.Config.Base + "__tmp_"
+	svc, proxy := f.viaProxy(t, func(sql string) testpg.QueryFault {
+		if strings.HasPrefix(sql, prefix) {
+			return testpg.InjectQueryError
+		}
+		return testpg.ForwardQuery
+	})
+	reset, err := svc.Reset(t.Context(), "topic", false, EnsureOptions{NoRefill: true})
+	if got := proxy.Injected(testpg.InjectQueryError); got != 1 || err != nil || !reset.Reset || !reset.Created {
+		t.Fatalf("reset after %d injected DROP errors: reset=%t, created=%t, err=%v", got, reset.Reset, reset.Created, err)
+	}
+	if current := f.database(t, old.Name); current.OID == old.OID {
+		t.Fatal("reset did not publish the replacement")
+	}
+	tmp := f.tmpDatabases(t)
+	if len(tmp) != 1 || tmp[0].OID != old.OID || tmp[0].Marker.Kind != marker.Tmp || tmp[0].Marker.Gen != 0 {
+		t.Fatalf("want the old database marked for cleanup, got %+v", tmp)
+	}
+	if len(reset.Warnings) != 1 || !strings.Contains(reset.Warnings[0], tmp[0].Name) || !strings.Contains(reset.Warnings[0], "pgcheckout gc") {
+		t.Fatalf("reset warnings = %v, want cleanup warning for %q", reset.Warnings, tmp[0].Name)
+	}
+	collected, err := f.svc.GC(t.Context(), false)
+	if err != nil || !slices.Equal(collected.Dropped, []string{tmp[0].Name}) || f.exists(t, tmp[0].Name) {
+		t.Fatalf("gc after reset = %+v, %v", collected, err)
+	}
+}
+
+func (f *fixture) checkResetReplacement(t *testing.T, old pg.Database) {
+	t.Helper()
+	if current := f.database(t, old.Name); current.OID == old.OID {
+		t.Fatalf("reset preserved the original database OID %d", old.OID)
+	}
+	var oldExists bool
+	err := f.admin.QueryRow(t.Context(), "SELECT EXISTS (SELECT FROM pg_database WHERE oid = $1)", old.OID).Scan(&oldExists)
+	if err != nil || oldExists {
+		t.Fatalf("old database OID %d after reset: exists=%t, err=%v", old.OID, oldExists, err)
+	}
+	if tmp := f.tmpDatabases(t); len(tmp) != 0 {
+		t.Fatalf("reset left temporary databases: %+v", tmp)
+	}
+}
+
 func TestPoolDrain(t *testing.T) {
 	f := newFixture(t, nil)
 	branch := f.ensure(t, "topic")
