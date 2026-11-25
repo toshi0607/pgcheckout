@@ -1,227 +1,229 @@
-# pgcheckout 設計
+# pgcheckout design
 
-pgcheckout は、PostgreSQL 互換のサーバーの中で開発用のデータベースを複製し、git のブランチごとに 1 つずつ割り当てる CLI である。
-対象は、接続文字列で届く PostgreSQL 互換のサーバー（手元の PostgreSQL、AlloyDB Omni、マネージドの AlloyDB など）に限る。
-MySQL など、サーバー内でデータベースを複製できない製品は対象にしない。
+English | [日本語](DESIGN.ja.md)
 
-## 用語
+pgcheckout is a CLI that copies a development database inside a PostgreSQL-compatible server and assigns 1 copy to each git branch.
+It targets only PostgreSQL-compatible servers reachable by connection string (a local PostgreSQL, AlloyDB Omni, managed AlloyDB, and so on).
+Products that cannot copy a database inside the server, such as MySQL, are out of scope.
 
-| 用語 | 意味 |
+## Terms
+
+| Term | Meaning |
 |---|---|
-| ベース | 複製元になるデータベース。接続を禁止して保護する |
-| ブランチ | ベースから複製した、開発者やエージェントが接続して使うデータベース |
-| プール | ベースから先に複製しておいた、まだ誰にも割り当てていないデータベース |
-| 世代 | ベースの内容が変わるたびに 1 増える整数。複製がどの時点のベースから作られたかを表す |
-| 管理用データベース | pgcheckout が管理の SQL を実行するために接続するデータベース。ベースとは別のもの |
-| 目印 | pgcheckout が管理していることを示す、データベースのコメントに書いた JSON |
+| Base | The database that copies are made from. It is protected by forbidding connections |
+| Branch | A copy of the base that developers and agents connect to and use |
+| Pool | Databases copied from the base in advance that are not yet assigned to anyone |
+| Generation | An integer that increases by 1 each time the contents of the base change. It records which state of the base a copy was made from |
+| Maintenance database | The database pgcheckout connects to in order to run management SQL. It is separate from the base |
+| Marker | JSON written in a database comment that shows pgcheckout manages the database |
 
-## 複製の方式
+## Copy strategy
 
-複製には `CREATE DATABASE ... TEMPLATE` を使う。
-方式はサーバーのバージョンから選び、選んだ方式を出力に含める。
+Copies use `CREATE DATABASE ... TEMPLATE`.
+The strategy is chosen from the server version, and the chosen strategy is included in the output.
 
-| サーバー | 方式 | 理由 |
+| Server | Strategy | Reason |
 |---|---|---|
-| 18 以上 | `file_copy_method=clone` を設定して `STRATEGY=FILE_COPY` | ブロックを共有できるファイルシステムでは、複製の時間が容量に比例しなくなる |
-| 15〜17 | `STRATEGY=WAL_LOG` | `FILE_COPY` は前後にチェックポイントが入り、AlloyDB Omni 17 では遅い回があった |
-| 14 以下 | 指定なし | `STRATEGY` 句が無い |
+| 18 or later | `STRATEGY=FILE_COPY` with `file_copy_method=clone` set | On a filesystem that can share blocks, copy time no longer grows with size |
+| 15-17 | `STRATEGY=WAL_LOG` | `FILE_COPY` adds checkpoints before and after, and was slow in some runs on AlloyDB Omni 17 |
+| 14 or earlier | not specified | There is no `STRATEGY` clause |
 
-`file_copy_method` の設定に失敗したサーバーでは、`FILE_COPY` のまま複製する。
-方式は `PGCHECKOUT_STRATEGY` で上書きできる。
+On a server where setting `file_copy_method` fails, the copy proceeds with `FILE_COPY` as is.
+The strategy can be overridden with `PGCHECKOUT_STRATEGY`.
 
-`CREATE DATABASE ... TEMPLATE` は、次の 3 つを複製しない（PostgreSQL 18.7 で確認した）。
+`CREATE DATABASE ... TEMPLATE` does not copy the following 3 things (confirmed on PostgreSQL 18.7).
 
-- データベース単位の設定（`ALTER DATABASE ... SET`）
-- データベースへの権限（`GRANT ... ON DATABASE`）
-- データベースのコメント
+- Per-database settings (`ALTER DATABASE ... SET`)
+- Privileges on the database (`GRANT ... ON DATABASE`)
+- The database comment
 
-pgcheckout は複製の直後に、ベースの設定と権限を複製先へ付け直す。
-コメントは複製されないので、ベースの目印がブランチへ写ることはない。
+Right after copying, pgcheckout reapplies the base's settings and privileges to the destination.
+Comments are not copied, so the base's marker never carries over to a branch.
 
-## 目印と破壊的な操作の範囲
+## Markers and the scope of destructive operations
 
-目印は、次の形の JSON をデータベースのコメントに書いたものである。
+A marker is JSON of the following form, written in a database comment.
 
 ```json
 {"pgcheckout":1,"kind":"branch","base":"app","gen":3,"branch":"feat/login","created_at":"2026-11-22T06:00:00Z","strategy":"file_copy_clone"}
 ```
 
-`kind` は `base`、`branch`、`pool`、`tmp` のいずれかである。
-期限を付けたブランチには `expires_at` が、ベースには開閉の状態を表す `open` が加わる。
-設定や権限の付け直しに失敗した複製には、失敗の件数を表す `warnings` が加わる。
+`kind` is one of `base`, `branch`, `pool`, or `tmp`.
+A branch with an expiry gets `expires_at`, and a base gets `open`, which shows whether it is open or closed.
+A copy whose settings or privileges failed to reapply gets `warnings`, the number of failures.
 
-削除、作り直し、プールの破棄、期限切れの掃除は、目印があり、`base` が対象のベースと一致し、`kind` が `branch`、`pool`、`tmp` のいずれかであるデータベースだけに実行する。
-名前の接頭辞だけを根拠にした削除は行わない。
-ベースと管理用データベースは、どのコマンドでも削除しない。
-名前が pgcheckout の規則に合うのに目印が無いデータベースは、`list` と `doctor` が `unmanaged` として報告するだけにする。
+Delete, reset, pool drain, and expired-database cleanup run only on databases that have a marker, whose `base` matches the target base, and whose `kind` is one of `branch`, `pool`, or `tmp`.
+No deletion is based on a name prefix alone.
+No command deletes the base or the maintenance database.
+A database whose name matches pgcheckout's naming rules but has no marker is only reported as `unmanaged` by `list` and `doctor`.
 
-## 名前の規則
+## Naming rules
 
-- ブランチ: `<ベース名>__<スラッグ>`
-- プール: `<ベース名>__pool_<16 進 8 桁>`
-- 複製の途中: `<ベース名>__tmp_<16 進 8 桁>`
+- Branch: `<base name>__<slug>`
+- Pool: `<base name>__pool_<8 hex digits>`
+- Copy in progress: `<base name>__tmp_<8 hex digits>`
 
-スラッグは、ブランチ名を小文字にし、`a-z0-9_` 以外を `_` に置き換えたものである。
-置き換えか切り詰めが起きた場合は、元のブランチ名の SHA-256 の先頭 8 桁を `_` に続けて付ける。
-名前全体は 63 バイト以内に収める。
-ブランチとデータベースの対応は、名前ではなく目印の `branch` で確かめる。
+The slug is the branch name lowercased, with every character outside `a-z0-9_` replaced by `_`.
+If a replacement or truncation happened, the first 8 digits of the SHA-256 of the original branch name are appended after `_`.
+The whole name stays within 63 bytes.
+The mapping between a branch and a database is verified by the marker's `branch`, not by the name.
 
-## ベースの扱い
+## Handling the base
 
-ベースは `ALLOW_CONNECTIONS false` にして保護する。
-接続を禁止したデータベースも複製元にでき、複製先は接続できる状態で作られる（PostgreSQL 18.7 で確認した）。
-接続が無いことが保証されるので、複製元に接続が残っていて複製に失敗する事態を避けられる。
+The base is protected with `ALLOW_CONNECTIONS false`.
+A database that forbids connections can still be a copy source, and the destination is created in a connectable state (confirmed on PostgreSQL 18.7).
+This guarantees there are no connections, which avoids a copy failing because connections remain on the source.
 
-| コマンド | 動作 |
+| Command | Behavior |
 |---|---|
-| `base create <名前> --from <既存のDB>` | 既存のデータベースを複製してベースを作る。元のデータベースはそのまま使える |
-| `base adopt <既存のDB>` | 既存のデータベースをそのままベースにする。以後、そのデータベースには接続できない |
-| `base open` | ベースへの接続を許可する。マイグレーションなどでベースを変えるときに使う |
-| `base close` | ベースへの接続を禁止し、世代を 1 増やす。世代の古いプールを破棄する |
+| `base create <name> --from <existing DB>` | Creates the base by copying an existing database. The original database stays usable |
+| `base adopt <existing DB>` | Makes an existing database the base as is. After that, no one can connect to that database |
+| `base open` | Allows connections to the base. Use it when changing the base, for example with migrations |
+| `base close` | Forbids connections to the base and increases the generation by 1. Discards pools of an older generation |
 
-世代が増えるのは `base close` だけである。
-`base create` と `base adopt` は、同じベース名のプールとブランチが残っていれば、その世代の最大値に 1 を足した世代から始める。残っていなければ 1 から始める。ベースを pgcheckout の外で消して作り直しても、前のベースの複製が古い世代として扱われる。
-ベースが開いているあいだ、`ensure` は新しい複製を作らず、`base_open` のエラーを返す。既に在るブランチは、ベースが開いていても返す。
-すでにベースになっているデータベースが開いているとき、`base adopt` は `base_open` のエラーを返す。閉じるのは `base close` だけである。
-接続を禁止しても、既に張られている接続は切れない。そのため、接続を禁止した直後に接続をもう一度数え、残っていればベースを開いた状態へ戻して `database_in_use` を返す。世代を増やすのは、接続が残っていないことを確かめたあとである。
-ベースの名前には `__` を含められず、末尾を `_` にもできない。別のベースのデータベースと名前の規則が重なるのを避けるためである。
-`base adopt` が失敗したときは、対象のデータベースのコメントと接続の可否を元に戻す。失敗したあとに目印は残らない。
-`base create` は、複製が `tmp` のあいだに接続を禁止して接続が残っていないことを確かめ、最後に名前を付け替えてベースにする。途中で失敗したときは `tmp` を削除するので、ベースは残らない。例外は、`CREATE DATABASE` の応答が失われた場合である（後述）。
-`base adopt`、`base close`、`base create` は、対象に他の接続が残っていると `database_in_use` のエラーを返す。`--terminate` を付けたときだけ、残っている接続を切る。
+Only `base close` increases the generation.
+`base create` and `base adopt` start from the maximum generation among the remaining pools and branches with the same base name plus 1. If none remain, they start from 1. Even if the base is deleted outside pgcheckout and created again, copies of the previous base are treated as an older generation.
+While the base is open, `ensure` does not create new copies and returns the `base_open` error. It still returns branches that already exist, even when the base is open.
+When the database that is already the base is open, `base adopt` returns the `base_open` error. Only `base close` closes it.
+Forbidding connections does not cut connections that are already established. So right after forbidding connections, pgcheckout counts connections again. If any remain, it returns the base to the open state and returns `database_in_use`. It increases the generation only after confirming no connections remain.
+A base name cannot contain `__` and cannot end with `_`. This avoids overlapping with the naming rules of databases that belong to another base.
+When `base adopt` fails, it restores the target database's comment and connection permission. No marker remains after a failure.
+`base create` forbids connections while the copy is still `tmp`, confirms no connections remain, and finally renames it to make it the base. If it fails partway, it deletes the `tmp`, so no base remains. The exception is when the response to `CREATE DATABASE` is lost (see below).
+`base adopt`, `base close`, and `base create` return the `database_in_use` error when other connections remain on the target. Only with `--terminate` do they cut the remaining connections.
 
-## ensure の流れ
+## The ensure flow
 
-`ensure [ブランチ名]` は、ブランチ用のデータベースが在る状態にして、その接続先を返す。
-ブランチ名を省くと、git の現在のブランチ名を使う。
+`ensure [branch name]` makes sure a branch database exists and returns its connection target.
+If the branch name is omitted, it uses git's current branch name.
 
-1. ベースの目印を読み、管理用データベースでアドバイザリロックを取る。
-2. ブランチ名から決まる名前のデータベースを探す。在って目印の `branch` が一致すれば、何も変えずに返す（`created: false`）。世代がベースより古ければ `stale: true` を付ける。作り直しはしない。同じ名前で目印が無い、または目印が別のブランチを指すデータベースが在れば、`unmanaged_database` のエラーを返す。
-3. 無ければ、世代がベースと同じプールを 1 つ選び、名前の変更と目印の書き換えを 1 つのトランザクションで行う（`source: "pool"`）。
-4. プールが空なら、ロックの外で `tmp` の名前に複製して設定と権限を付け直し、ロックを取り直して 2. をやり直してから、名前の変更と目印の書き換えを行う（`source: "copy"`）。
-5. 結果を出力したあと、プールが目標の数に満たなければ、自分自身を切り離した別プロセスとして起動して補充する。補充のプロセスは標準入出力を引き継がない。
+1. Read the base's marker and take an advisory lock on the maintenance database.
+2. Look for a database with the name determined by the branch name. If it exists and the marker's `branch` matches, return it without changing anything (`created: false`). If its generation is older than the base, add `stale: true`. It does not recreate the database. If a database with the same name has no marker, or its marker points to a different branch, return the `unmanaged_database` error.
+3. If none exists, pick 1 pool whose generation equals the base's, and do the rename and the marker rewrite in 1 transaction (`source: "pool"`).
+4. If the pool is empty, outside the lock copy to a `tmp` name and reapply settings and privileges, retake the lock and redo step 2, then do the rename and the marker rewrite (`source: "copy"`).
+5. After printing the result, if the pool is below the target count, start a refill as a separate process detached from itself. The refill process does not inherit standard input and output.
 
-名前の変更と目印の書き換えは 1 つのトランザクションに入るので、最終的な名前で目印の無いデータベースが残ることはない。
-`CREATE DATABASE` はトランザクションに入れられないため、複製の直後に異常終了すると、目印の無い `tmp` が残りうる。これは `doctor` が報告する。
-目印の書き込みは 3 回まで試す。中断などでクライアント側が先に `CREATE DATABASE` を諦めたときは、別の接続でデータベースの有無を調べ、在れば目印を付ける。目印を付けた `tmp` はその場では削除せず、エラーに名前を含める。`gc` が作成の 1 時間後に削除し、`pool drain` はすぐに削除する。`base create` の途中で残った場合は、ベースを作り直したあとに削除できる。それでも付けられなかったときは、エラーにデータベースの名前を含める。
+The rename and the marker rewrite are in 1 transaction, so a database with the final name and no marker is never left behind.
+`CREATE DATABASE` cannot run inside a transaction, so if the process dies right after copying, a `tmp` without a marker can remain. `doctor` reports it.
+Marker writes are tried up to 3 times. If the client gives up on `CREATE DATABASE` first, for example because of an interruption, pgcheckout checks over another connection whether the database exists and, if it does, writes the marker. It does not delete a marked `tmp` on the spot, and the error includes its name. `gc` deletes it 1 hour after creation, and `pool drain` deletes it immediately. If one is left during `base create`, it can be deleted after the base is created again. If the marker still could not be written, the error includes the database name.
 
-同じブランチに対する `ensure` が同時に 2 つ走った場合、後からロックを取った側は 1. で既存のデータベースを見つけ、自分の複製を捨てる。
+If 2 `ensure` calls for the same branch run at the same time, the one that takes the lock later finds the existing database in step 1 and discards its own copy.
 
-アドバイザリロックは、接続しているデータベースごとに独立している。同じベースを使う全員が、同じ管理用データベースを指定する必要がある。
+Advisory locks are independent for each database you connect to. Everyone who uses the same base must specify the same maintenance database.
 
-## コマンド
+## Commands
 
-| コマンド | 動作 |
+| Command | Behavior |
 |---|---|
-| `ensure [ブランチ]` | 上記 |
-| `list` | ベース、ブランチ、プール、`unmanaged` の一覧 |
-| `dsn [ブランチ]` | ブランチの接続文字列 |
-| `drop [ブランチ]` | ブランチを削除する。接続が残っていれば失敗し、`--force` で切って削除する |
-| `reset [ブランチ]` | ブランチを削除して作り直す |
-| `pool fill` / `pool status` / `pool drain` | プールの補充、状態、破棄 |
-| `gc` | 期限切れのブランチと、世代の古いプールを削除する。`--dry-run` あり |
-| `doctor` | サーバーのバージョン、権限、選ばれる方式、ベースの状態、`unmanaged` を報告する |
-| `base ...` | 上記 |
-| `hook install` / `hook uninstall` | git の post-checkout フックを入れる、外す |
-| `help` | コマンド、フラグ、環境変数の一覧を JSON で返す |
+| `ensure [branch]` | See above |
+| `list` | Lists the base, branches, pools, and `unmanaged` databases |
+| `dsn [branch]` | The branch's connection string |
+| `drop [branch]` | Deletes the branch. It fails if connections remain, and `--force` cuts them and deletes |
+| `reset [branch]` | Deletes the branch and recreates it |
+| `pool fill` / `pool status` / `pool drain` | Fill, status, and discard of the pool |
+| `gc` | Deletes expired branches and pools of an older generation. Has `--dry-run` |
+| `doctor` | Reports the server version, privileges, the selected strategy, the base state, and `unmanaged` databases |
+| `base ...` | See above |
+| `hook install` / `hook uninstall` | Installs or removes the git post-checkout hook |
+| `help` | Returns the list of commands, flags, and environment variables as JSON |
 
-期限は `ensure --ttl 72h` のように明示したときだけ付く。
+An expiry is set only when stated explicitly, as in `ensure --ttl 72h`.
 
-## 設定
+## Configuration
 
-設定は環境変数とフラグで渡す。リポジトリに `.pgcheckout.json` があれば、秘密でない値（`base`、`pool_size`、`strategy`）をそこから読む。
+Configuration is passed through environment variables and flags. If the repository has `.pgcheckout.json`, non-secret values (`base`, `pool_size`, `strategy`) are read from it.
 
-| 環境変数 | 意味 |
+| Environment variable | Meaning |
 |---|---|
-| `PGCHECKOUT_ADMIN_URL` | 管理用データベースへの接続文字列。無ければ `DATABASE_URL` を使わず、エラーにする |
-| `PGCHECKOUT_BASE` | ベースの名前 |
-| `PGCHECKOUT_POOL_SIZE` | プールの目標数。既定は 2、0 でプールを使わない |
-| `PGCHECKOUT_STRATEGY` | 方式の上書き（`clone`、`file_copy`、`wal_log`、`default`） |
+| `PGCHECKOUT_ADMIN_URL` | Connection string for the maintenance database. If unset, it does not fall back to `DATABASE_URL` and returns an error |
+| `PGCHECKOUT_BASE` | The base name |
+| `PGCHECKOUT_POOL_SIZE` | Target pool size. Default is 2, and 0 disables the pool |
+| `PGCHECKOUT_STRATEGY` | Strategy override (`clone`, `file_copy`, `wal_log`, `default`) |
 
-`DATABASE_URL` を既定で読まないのは、アプリケーション用の接続先を管理用として誤って使うと、ベースや本番に近いデータベースへ管理の SQL を実行しうるからである。
+`DATABASE_URL` is not read by default because using an application connection target as the maintenance one by mistake could run management SQL against the base or a database close to production.
 
-ブランチの接続文字列は、管理用の接続文字列のデータベース名だけを置き換えて作る。
+A branch's connection string is built by replacing only the database name in the maintenance connection string.
 
-## 入出力
+## Input and output
 
-- 標準出力には、既定で JSON のオブジェクトを 1 つだけ書く。`--format text` で人間向けの表示に変える。
-- エラーは標準エラーに `{"error":{"code":"...","message":"...","hint":"..."}}` の形で書く。`code` は固定の語彙から選ぶ。
-- 終了コードは、成功が 0、実行時の失敗が 1、使い方の誤りが 2。
-- 入力を促す対話はしない。
-- 補充の起動に失敗したときだけ、標準エラーに `{"warning":{"code":"refill_failed","message":"..."}}` を書く。終了コードは 0 のままにする。
+- Standard output gets exactly 1 JSON object by default. `--format text` switches to human-readable output.
+- Errors go to standard error as `{"error":{"code":"...","message":"...","hint":"..."}}`. `code` is chosen from a fixed vocabulary.
+- Exit codes: 0 for success, 1 for a runtime failure, 2 for a usage error.
+- It never prompts for input.
+- Only when starting a refill fails does it write `{"warning":{"code":"refill_failed","message":"..."}}` to standard error. The exit code stays 0.
 
-## 強制削除の再試行
+## Retrying forced deletion
 
-`drop --force` は、権限不足（42501）か使用中（55006）で失敗したとき、300 ミリ秒おきに合計 5 回まで試す。
-AlloyDB Omni は、内部の統計用の接続を各データベースへ短時間だけ張る。その接続が在る瞬間は、一般のロールでは接続を切れず、強制削除が権限不足で失敗するからである。
-目印の確認は、試行のたびに削除の直前で行う。
+When `drop --force` fails with insufficient privilege (42501) or object in use (55006), it retries every 300 ms, up to 5 times in total.
+AlloyDB Omni briefly opens internal statistics connections to each database. While one of those connections exists, an ordinary role cannot cut connections, and forced deletion fails with insufficient privilege.
+The marker check runs just before the delete on every attempt.
 
-## 構成
+## Structure
 
 ```
-cmd/pgcheckout/        エントリポイント
-internal/cli/      引数の解釈、出力、終了コード
-internal/config/   環境変数、フラグ、.pgcheckout.json
-internal/naming/   スラッグとデータベース名
-internal/marker/   目印の符号化と復号
-internal/pg/       接続、複製の方式、SQL
-internal/branch/   ensure、drop、reset、list、gc、pool、base の手順
-internal/gitx/     git の呼び出し、post-checkout フック、接続先を書き出すファイル
-internal/mcpserver/ MCP のサーバーとツール
-internal/testpg/   結合テストの後片付け（結合テストのときだけビルドする）
+cmd/pgcheckout/        entry point
+internal/cli/      argument parsing, output, exit codes
+internal/config/   environment variables, flags, .pgcheckout.json
+internal/naming/   slugs and database names
+internal/marker/   marker encoding and decoding
+internal/pg/       connections, copy strategies, SQL
+internal/branch/   the ensure, drop, reset, list, gc, pool and base procedures
+internal/gitx/     git invocations, the post-checkout hook, the connection file
+internal/mcpserver/ the MCP server and its tools
+internal/testpg/   integration test cleanup (built only for integration tests)
 ```
 
-依存は `github.com/jackc/pgx/v5` と、MCP の公式 Go SDK（`github.com/modelcontextprotocol/go-sdk`、スキーマの推論に `github.com/google/jsonschema-go`）にとどめる。引数の解釈は標準ライブラリの `flag` で行う。
+Dependencies are limited to `github.com/jackc/pgx/v5` and the official MCP Go SDK (`github.com/modelcontextprotocol/go-sdk`, with `github.com/google/jsonschema-go` for schema inference). Argument parsing uses the standard library's `flag`.
 
-## テスト
+## Tests
 
-- 単体テスト: 名前、目印、方式の選択、設定の解釈。データベースを使わない。
-- 結合テスト: ビルドタグ `integration` を付け、`PGCHECKOUT_TEST_ADMIN_URL` が指すサーバーで実行する。未設定なら飛ばす。PostgreSQL 18 と AlloyDB Omni 17 の両方で実行する。
-- 結合テストは、`CREATEDB` だけを持つロールで実行する。
+- Unit tests: names, markers, strategy selection, and configuration parsing. They use no database.
+- Integration tests: built with the build tag `integration` and run against the server that `PGCHECKOUT_TEST_ADMIN_URL` points to. They are skipped if it is unset. They run on both PostgreSQL 18 and AlloyDB Omni 17.
+- Integration tests run with a role that has only `CREATEDB`.
 
-## 実測（2026-11-22、Apple Silicon の Mac、1 GB のデータベース）
+## Measurements (2026-11-22, Apple Silicon Mac, 1 GB database)
 
-| 環境 | 複製 | 名前の変更 |
+| Environment | Copy | Rename |
 |---|---|---|
-| PostgreSQL 18.7（macOS、APFS、`clone`） | 43〜106 ミリ秒 | 0.12〜0.22 ミリ秒 |
-| PostgreSQL 18.7（Docker、ext4、`clone`） | 3.07 秒 | 未計測 |
-| PostgreSQL 18.7（Docker、XFS、`clone`） | 43〜68 ミリ秒 | 0.54 ミリ秒 |
-| AlloyDB Omni 17.10（Docker、ext4、`WAL_LOG`、493 MB） | 0.95〜1.02 秒 | 0.8〜3.1 ミリ秒 |
+| PostgreSQL 18.7 (macOS, APFS, `clone`) | 43-106 ms | 0.12-0.22 ms |
+| PostgreSQL 18.7 (Docker, ext4, `clone`) | 3.07 s | not measured |
+| PostgreSQL 18.7 (Docker, XFS, `clone`) | 43-68 ms | 0.54 ms |
+| AlloyDB Omni 17.10 (Docker, ext4, `WAL_LOG`, 493 MB) | 0.95-1.02 s | 0.8-3.1 ms |
 
-各 1〜4 回の計測で、ばらつきは調べていない。
+Each is 1 to 4 measurements, and the variance was not examined.
 
-## MCP サーバー
+## MCP server
 
-`pgcheckout mcp` は、標準入出力で MCP のサーバーとして動く。エージェントはコマンドを組み立てずに、ツールとして呼べる。
+`pgcheckout mcp` runs as an MCP server over standard input and output. Agents can call tools instead of assembling commands.
 
-実装には公式の Go SDK（`github.com/modelcontextprotocol/go-sdk`）を使う。
-MCP は 2026-07-28 版で接続の手順が変わり、`initialize` を使う旧来のクライアントと、`server/discover` を使う新しいクライアントが混在している。SDK は両方に応えるので、手順の追従を SDK に任せる。
+It uses the official Go SDK (`github.com/modelcontextprotocol/go-sdk`).
+The 2026-07-28 version of MCP changed the connection procedure, and older clients that use `initialize` and newer clients that use `server/discover` now coexist. The SDK serves both, so following the procedure is left to the SDK.
 
-ツールは次の 8 つである。ベースの操作と `pool drain` は、ほかの利用者に影響するので含めない。
+There are 8 tools. Base operations and `pool drain` are excluded because they affect other users.
 
-| ツール | 内容 | 性質 |
+| Tool | Description | Nature |
 |---|---|---|
-| `doctor` | サーバー、ロール、ベースの状態を返す | 読み取りだけ |
-| `list` | ベース、ブランチ、プールの一覧を返す | 読み取りだけ |
-| `pool_status` | プールの状態を返す | 読み取りだけ |
-| `dsn` | ブランチのデータベースの接続先を返す | 読み取りだけ |
-| `ensure` | ブランチのデータベースを用意する | 冪等 |
-| `reset` | ブランチのデータベースを作り直す | 破壊的 |
-| `drop` | ブランチのデータベースを削除する | 破壊的 |
-| `gc` | 期限切れのデータベースを削除する | 破壊的 |
+| `doctor` | Returns the state of the server, role, and base | read-only |
+| `list` | Returns the list of the base, branches, and pools | read-only |
+| `pool_status` | Returns the pool state | read-only |
+| `dsn` | Returns the connection target of a branch database | read-only |
+| `ensure` | Prepares a branch database | idempotent |
+| `reset` | Recreates a branch database | destructive |
+| `drop` | Deletes a branch database | destructive |
+| `gc` | Deletes expired databases | destructive |
 
-CLI との違いは 3 つある。
+There are 3 differences from the CLI.
 
-- 接続先のパスワードを結果に含めない。ツールの結果は会話の記録に残るためである。`url` はパスワードを抜いた形で返し、`password_redacted` で抜いたことを示す。パスワードを含む接続先が要るときは、`ensure` と `reset` の `env_file` でファイルへ書き出す。
-- `reset` と `drop` はブランチ名を必ず受け取る。サーバーの作業ディレクトリはクライアントが決めるので、エージェントが作業しているリポジトリと一致するとは限らない。`ensure` と `dsn` はブランチ名を省略でき、解決したブランチ名を結果に含める。
-- 失敗は、`isError` を立てたツールの結果として返す。本文は CLI と同じ `{"error":{"code","message","hint"}}` である。設定が無い場合もサーバーは終了せず、ツールの失敗として返す。
+- Results do not include the connection target's password, because tool results stay in the conversation record. `url` is returned with the password removed, and `password_redacted` shows that it was removed. When a connection target that includes the password is needed, write it to a file with `env_file` on `ensure` and `reset`.
+- `reset` and `drop` always take a branch name. The client decides the server's working directory, so it does not necessarily match the repository the agent is working in. `ensure` and `dsn` can omit the branch name and include the resolved branch name in the result.
+- Failures are returned as tool results with `isError` set. The body is the same `{"error":{"code","message","hint"}}` as the CLI. Even when configuration is missing, the server does not exit and returns a tool failure.
 
-設定は、ツールを呼ぶたびに CLI と同じ手順で読む。
-標準出力には MCP のメッセージだけを書く。
-標準入力が閉じたときは、実行中のツールを中断し、後始末が終わるのを待ってから終了する。
+Configuration is read on every tool call, by the same procedure as the CLI.
+Standard output carries only MCP messages.
+When standard input closes, the server cancels running tools, waits for cleanup to finish, and then exits.
 
-## 対象にしないもの
+## Non-goals
 
-- ブランチ同士のマージと差分
-- ブランチごとの別プロセス、別バージョン
-- MySQL などほかの製品
-- ベースの操作と `pool drain`、`hook` を MCP のツールにすること
+- Merging and diffing between branches
+- Separate processes or separate versions per branch
+- Other products such as MySQL
+- Exposing base operations, `pool drain`, and `hook` as MCP tools
