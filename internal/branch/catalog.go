@@ -48,7 +48,7 @@ func (svc Service) List(ctx context.Context) (ListResult, error) {
 			m := d.Marker
 			switch m.Kind {
 			case marker.Branch:
-				info := BranchInfo{Branch: m.Branch, Database: d.Name, Gen: m.Gen, Stale: m.Gen < base.Marker.Gen,
+				info := BranchInfo{Branch: m.Branch, Database: d.Name, Gen: m.Gen, Stale: m.Gen != base.Marker.Gen,
 					CreatedAt: m.CreatedAt, ExpiresAt: m.ExpiresAt}
 				if size, err := pg.DatabaseSize(ctx, s.Conn, d.OID); err == nil {
 					info.SizeBytes = &size

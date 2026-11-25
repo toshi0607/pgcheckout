@@ -84,7 +84,7 @@ pgcheckout hook install --env-file .env.pgcheckout
 ## ベースを更新する
 
 マイグレーションなどでベースの内容を変えるときは、ベースを開いて変更し、閉じる。
-閉じるとベースの世代が 1 増え、古い世代から作ったプールが破棄される。
+閉じるとベースは新しい世代になり、ほかの世代から作ったプールが破棄される。
 
 ```bash
 pgcheckout base open
@@ -94,7 +94,7 @@ pgcheckout base open
 pgcheckout base close
 ```
 
-既存のブランチは作り直されない。古い世代のブランチには、`ensure` と `list` の出力で `stale: true` が付く。
+既存のブランチは作り直されない。ベースと世代が違うブランチには、`ensure` と `list` の出力で `stale: true` が付く。
 作り直すときは `pgcheckout reset` を使う。
 
 ## コマンド
@@ -107,7 +107,7 @@ pgcheckout base close
 | `drop [ブランチ]` | ブランチを削除する。接続が残っていれば `--force` が要る |
 | `reset [ブランチ]` | ブランチを削除して作り直す |
 | `pool fill` / `pool status` / `pool drain` | プールの補充、状態、破棄 |
-| `gc` | 期限切れのブランチと古い世代のプールを削除する |
+| `gc` | 期限切れのブランチと、ベースと世代が違うプールを削除する |
 | `doctor` | サーバー、権限、ベースの状態を報告する |
 | `base create` / `base adopt` / `base open` / `base close` | ベースの作成と更新 |
 | `hook install` / `hook uninstall` | post-checkout フック |

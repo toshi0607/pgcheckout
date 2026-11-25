@@ -17,6 +17,7 @@ CONSTANTS
     Ops,         \* operations a process may start
     Faults,      \* subset of {"cancel", "loss", "crash"}
     External,    \* TRUE: the base may be dropped and recreated outside pgcheckout
+    Reentry,     \* TRUE: a marked base may also be renamed away and back, or restored from a dump
     InitBases,   \* subset of {"absent", "unmarked", "closed"}
     MaxGen, MaxContent, MaxCopies, MaxOps, MaxFaults, MaxExternal,
     PoolTarget   \* pool size, shared by ensure and pool fill
@@ -33,6 +34,8 @@ VARIABLES
     claim, fillLock,
     pc, op, arg, flag, seen, cid, conn, canc, res, dnext, rdrop,
     opsLeft, faultsLeft, extLeft,
+    parked,      \* a marked base that was renamed away outside pgcheckout
+    dumped,      \* generation written in a dump taken while the base was open (0: no dump)
     reported,    \* ghost: copies named in an error message
     excused,     \* ghost: copies owned by a crashed process
     stuck,       \* ghost: a failed base restore was reported, or its owner crashed
@@ -41,7 +44,7 @@ VARIABLES
 vars == <<base, sessions, nextOid, sealed, copies, nextId, branchDb, late,
           claim, fillLock,
           pc, op, arg, flag, seen, cid, conn, canc, res, dnext, rdrop,
-          opsLeft, faultsLeft, extLeft, reported, excused, stuck, resetLost>>
+          opsLeft, faultsLeft, extLeft, parked, dumped, reported, excused, stuck, resetLost>>
 
 AbsentBase == [st |-> "absent", open |-> FALSE, allow |-> FALSE, gen |-> 0, content |-> 0, oid |-> 0]
 NoBranch   == [ex |-> FALSE, gen |-> 0, content |-> 0, exp |-> "none"]
@@ -55,11 +58,15 @@ Closing  == Marked /\ base.open /\ ~base.allow
 
 ReadyPool == {c \in copies : c.kind = "pool" /\ c.gen = base.gen}
 
-(* firstGen, base.go: a new base starts one above every generation still stamped on a pool or branch database. *)
+(* highestStampedGen, base.go:39-60: generations still stamped on a pool or branch database, or on a base that was renamed away. *)
+(* A new base starts one above all of them. *)
 MarkedGens == {c.gen : c \in {x \in copies : x.kind = "pool"}}
               \cup {branchDb[b].gen : b \in {x \in Branches : branchDb[x].ex}}
-FirstGen == IF MarkedGens = {} THEN 1
-            ELSE 1 + CHOOSE g \in MarkedGens : \A h \in MarkedGens : h <= g
+              \cup (IF parked.st = "marked" THEN {parked.gen} ELSE {})
+Highest(S) == CHOOSE g \in S : \A h \in S : h <= g
+FirstGen == IF MarkedGens = {} THEN 1 ELSE 1 + Highest(MarkedGens)
+(* base close, base.go: the next generation is one above the base's and every generation still stamped. *)
+NextGen == 1 + Highest(MarkedGens \cup {base.gen})
 Running(p) == pc[p] \notin {"idle", "done"}
 Quiescent == \A p \in Procs : ~Running(p)
 Bad(p) == canc[p] \/ ~conn[p]                \* SQL on the session connection with the caller's context fails
@@ -102,6 +109,7 @@ Init ==
     /\ dnext = [p \in Procs |-> "done"]
     /\ rdrop = [p \in Procs |-> FALSE]
     /\ opsLeft = MaxOps /\ faultsLeft = MaxFaults /\ extLeft = MaxExternal
+    /\ parked = AbsentBase /\ dumped = 0
     /\ reported = {} /\ excused = {} /\ stuck = FALSE /\ resetLost = FALSE
 
 ---------------------------------------------------------------------------
@@ -136,7 +144,7 @@ ToDiscard(p, r, nx) ==
 See(p) == seen' = [seen EXCEPT ![p] = [gen |-> base.gen, oid |-> base.oid]]
 SeenCurrent(p) == seen[p].gen = base.gen /\ seen[p].oid = base.oid
 
-Counters == <<opsLeft, faultsLeft, extLeft>>
+Counters == <<opsLeft, faultsLeft, extLeft, parked, dumped>>
 Ghosts   == <<reported, excused, stuck>>
 Params   == <<op, arg, flag, conn, canc>>
 
@@ -159,7 +167,7 @@ Start(p) ==
     /\ rdrop' = [rdrop EXCEPT ![p] = FALSE]
     /\ opsLeft' = opsLeft - 1
     /\ UNCHANGED <<base, sessions, nextOid, sealed, copies, nextId, branchDb, late,
-                   claim, fillLock, faultsLeft, extLeft, reported, excused, stuck, resetLost>>
+                   claim, fillLock, faultsLeft, extLeft, parked, dumped, reported, excused, stuck, resetLost>>
 
 (* ensure, first claim section: ensure.go:75-98 and claimPool, ensure.go:169-208 *)
 EClaim1(p) ==
@@ -358,7 +366,7 @@ FClaim2(p) ==
                     /\ UNCHANGED <<dnext, claim, fillLock>>
                     /\ Step(p, "f_claim1")
 
-(* base open: base.go:188-207 *)
+(* base open: base.go:198-217 *)
 BaseOpen(p) ==
     /\ pc[p] = "bo"
     /\ UNCHANGED <<sessions, nextOid, sealed, copies, nextId, branchDb, late, seen, cid, dnext, rdrop>>
@@ -368,7 +376,7 @@ BaseOpen(p) ==
             /\ IF ~Marked THEN UNCHANGED base /\ Finish(p, "no_base")
                ELSE base' = [base EXCEPT !.open = TRUE, !.allow = TRUE] /\ Finish(p, "ok")
 
-(* base close, first write: base.go:193-211 and closeBase, base.go:230-244 *)
+(* base close, first write: base.go:203-226 and closeBase, base.go:244-263 *)
 BC1(p) ==
     /\ pc[p] = "bc1"
     /\ UNCHANGED <<nextOid, sealed, copies, nextId, branchDb, late, cid, dnext, rdrop>>
@@ -383,7 +391,7 @@ BC1(p) ==
                     /\ See(p)
                     /\ Step(p, "bc2")
 
-(* base adopt, first write: base.go:136-178 and closeBase with adopt *)
+(* base adopt, first write: base.go:146-188 and closeBase with adopt *)
 BA1(p) ==
     /\ pc[p] = "ba1"
     /\ UNCHANGED <<nextOid, sealed, copies, nextId, branchDb, late, cid, dnext, rdrop>>
@@ -399,7 +407,7 @@ BA1(p) ==
                     /\ seen' = [seen EXCEPT ![p] = [gen |-> FirstGen, oid |-> base.oid]]
                     /\ Step(p, "bc2")
 
-(* checkClosedSessions: base.go:306-337 *)
+(* checkClosedSessions: base.go:320-351 *)
 BC2(p) ==
     /\ pc[p] = "bc2"
     /\ UNCHANGED <<base, nextOid, sealed, copies, nextId, branchDb, late, seen, cid, dnext, rdrop>>
@@ -411,10 +419,10 @@ BC2(p) ==
 
 BaseMatch(p) == Closing /\ SeenCurrent(p)    \* checkMutation, mutation.go:24-53
 
-(* finishBaseClose, final write, then the stale pool sweep: base.go:255-274, 194-201, gc.go:39-64 *)
+(* finishBaseClose, final write, then the stale pool sweep: base.go:271-288, 194-201, gc.go:39-64 *)
 BC3(p) ==
-    LET ng == IF op[p] = "adopt" THEN base.gen ELSE base.gen + 1
-        swept == {c \in copies : ~(c.kind \in {"pool", "tmp"} /\ c.gen < ng)}
+    LET ng == IF op[p] = "adopt" THEN base.gen ELSE NextGen
+        swept == {c \in copies : ~((c.kind = "pool" /\ c.gen # ng) \/ (c.kind = "tmp" /\ c.gen < ng))}
     IN
     /\ pc[p] = "bc3"
     /\ UNCHANGED <<sessions, nextOid, nextId, branchDb, late, seen, cid, dnext, rdrop>>
@@ -428,7 +436,7 @@ BC3(p) ==
        ELSE /\ UNCHANGED <<base, sealed, copies, claim, fillLock>>
             /\ StepR(p, "brestore", "error")
 
-(* finishBaseClose, restore: base.go:278-303.  Runs on a new connection, without the lock, after a loss. *)
+(* finishBaseClose, restore: base.go:292-317.  Runs on a new connection, without the lock, after a loss. *)
 BRestore(p) ==
     /\ pc[p] = "brestore"
     /\ UNCHANGED <<sessions, nextOid, sealed, copies, nextId, branchDb, late, seen, cid, dnext, rdrop>>
@@ -444,7 +452,7 @@ BRestore(p) ==
           /\ stuck' = TRUE
           /\ Finish(p, "restore_failed")
 
-(* base create: base.go:53-134.  The claim lock is held from the first lookup to the rename. *)
+(* base create: base.go:62-144.  The claim lock is held from the first lookup to the rename. *)
 BCR1(p) ==
     /\ pc[p] = "bcr1"
     /\ UNCHANGED <<base, sessions, nextOid, sealed, copies, nextId, branchDb, late, cid, dnext, rdrop>>
@@ -475,7 +483,7 @@ BCR2(p) ==
 
 (* gc: gc.go:25-64 *)
 GcEligible(c) ==
-    \/ c.kind = "pool" /\ c.gen < base.gen
+    \/ c.kind = "pool" /\ c.gen # base.gen
     \/ c.kind = "tmp" /\ (c.gen < base.gen \/ c.old)
 
 GC(p) ==
@@ -516,7 +524,7 @@ Cancel(p) ==
     /\ "cancel" \in Faults /\ faultsLeft > 0 /\ Running(p) /\ ~canc[p]
     /\ canc' = [canc EXCEPT ![p] = TRUE]
     /\ faultsLeft' = faultsLeft - 1
-    /\ UNCHANGED <<DB, PV, claim, fillLock, pc, conn, res, opsLeft, extLeft, Ghosts, resetLost>>
+    /\ UNCHANGED <<DB, PV, claim, fillLock, pc, conn, res, opsLeft, extLeft, parked, dumped, Ghosts, resetLost>>
 
 (* Advisory locks are session-scoped, so a lost connection releases them. *)
 ConnLoss(p) ==
@@ -524,7 +532,7 @@ ConnLoss(p) ==
     /\ conn' = [conn EXCEPT ![p] = FALSE]
     /\ ReleaseLocks(p)
     /\ faultsLeft' = faultsLeft - 1
-    /\ UNCHANGED <<DB, PV, pc, canc, res, opsLeft, extLeft, Ghosts, resetLost>>
+    /\ UNCHANGED <<DB, PV, pc, canc, res, opsLeft, extLeft, parked, dumped, Ghosts, resetLost>>
 
 Crash(p) ==
     LET srcOK == op[p] = "basecreate" \/ (base.st # "absent" /\ sessions = 0)
@@ -541,7 +549,7 @@ Crash(p) ==
           /\ copies' = copies \cup {orphan}
           /\ nextId' = nextId + 1
           /\ excused' = excused \cup {nextId}
-    /\ UNCHANGED <<base, sessions, nextOid, sealed, branchDb, late, PV, conn, canc, opsLeft, extLeft, reported>>
+    /\ UNCHANGED <<base, sessions, nextOid, sealed, branchDb, late, PV, conn, canc, opsLeft, extLeft, parked, dumped, reported>>
     /\ Finish(p, "crashed")
 
 ---------------------------------------------------------------------------
@@ -553,43 +561,43 @@ EnvU == <<claim, fillLock, pc, op, arg, flag, seen, cid, conn, canc, res, dnext,
 Connect ==
     /\ base.st # "absent" /\ base.allow /\ sessions = 0
     /\ sessions' = 1
-    /\ UNCHANGED <<base, nextOid, sealed, copies, nextId, branchDb, late, extLeft, EnvU>>
+    /\ UNCHANGED <<base, nextOid, sealed, copies, nextId, branchDb, late, extLeft, parked, dumped, EnvU>>
 
 Disconnect ==
     /\ sessions = 1
     /\ sessions' = 0
-    /\ UNCHANGED <<base, nextOid, sealed, copies, nextId, branchDb, late, extLeft, EnvU>>
+    /\ UNCHANGED <<base, nextOid, sealed, copies, nextId, branchDb, late, extLeft, parked, dumped, EnvU>>
 
 Migrate ==
     /\ sessions = 1 /\ base.content < MaxContent
     /\ base' = [base EXCEPT !.content = base.content + 1]
-    /\ UNCHANGED <<sessions, nextOid, sealed, copies, nextId, branchDb, late, extLeft, EnvU>>
+    /\ UNCHANGED <<sessions, nextOid, sealed, copies, nextId, branchDb, late, extLeft, parked, dumped, EnvU>>
 
 (* More than one hour passes for a temporary copy; a branch TTL expires. *)
 Age ==
     /\ \E c \in copies :
          /\ c.kind = "tmp" /\ ~c.old
          /\ copies' = (copies \ {c}) \cup {[c EXCEPT !.old = TRUE]}
-    /\ UNCHANGED <<base, sessions, nextOid, sealed, nextId, branchDb, late, extLeft, EnvU>>
+    /\ UNCHANGED <<base, sessions, nextOid, sealed, nextId, branchDb, late, extLeft, parked, dumped, EnvU>>
 
 Expire ==
     /\ \E b \in Branches :
          /\ branchDb[b].ex /\ branchDb[b].exp = "live"
          /\ branchDb' = [branchDb EXCEPT ![b].exp = "expired"]
-    /\ UNCHANGED <<base, sessions, nextOid, sealed, copies, nextId, late, extLeft, EnvU>>
+    /\ UNCHANGED <<base, sessions, nextOid, sealed, copies, nextId, late, extLeft, parked, dumped, EnvU>>
 
 LateCreate ==
     /\ \E c \in late :
          /\ late' = late \ {c}
          /\ \/ copies' = copies \cup {c}
             \/ UNCHANGED copies
-    /\ UNCHANGED <<base, sessions, nextOid, sealed, nextId, branchDb, extLeft, EnvU>>
+    /\ UNCHANGED <<base, sessions, nextOid, sealed, nextId, branchDb, extLeft, parked, dumped, EnvU>>
 
 ExternalDrop ==
     /\ External /\ extLeft > 0 /\ base.st # "absent" /\ sessions = 0
     /\ base' = AbsentBase
     /\ extLeft' = extLeft - 1
-    /\ UNCHANGED <<sessions, nextOid, sealed, copies, nextId, branchDb, late, EnvU>>
+    /\ UNCHANGED <<sessions, nextOid, sealed, copies, nextId, branchDb, late, parked, dumped, EnvU>>
 
 ExternalCreate ==
     /\ External /\ extLeft > 0 /\ base.st = "absent"
@@ -597,9 +605,43 @@ ExternalCreate ==
          base' = [AbsentBase EXCEPT !.st = "unmarked", !.allow = TRUE, !.content = c, !.oid = nextOid]
     /\ nextOid' = nextOid + 1
     /\ extLeft' = extLeft - 1
-    /\ UNCHANGED <<sessions, sealed, copies, nextId, branchDb, late, EnvU>>
+    /\ UNCHANGED <<sessions, sealed, copies, nextId, branchDb, late, parked, dumped, EnvU>>
+
+(* A marked base is renamed away and later renamed back.  Its marker and OID travel with it. *)
+ExternalPark ==
+    /\ External /\ Reentry /\ extLeft > 0 /\ Marked /\ sessions = 0 /\ parked = AbsentBase
+    /\ parked' = base
+    /\ base' = AbsentBase
+    /\ extLeft' = extLeft - 1
+    /\ UNCHANGED <<sessions, nextOid, sealed, copies, nextId, branchDb, late, dumped, EnvU>>
+
+ExternalUnpark ==
+    /\ External /\ Reentry /\ extLeft > 0 /\ base.st = "absent" /\ parked # AbsentBase
+    \* Not modelled: the base is swapped away and back while one copy that started from it is still in flight.
+    \* CREATE DATABASE names its template, so pgcheckout cannot tell which database the copy read.
+    /\ \A p \in Procs : Running(p) => seen[p].oid # parked.oid
+    /\ base' = parked
+    /\ parked' = AbsentBase
+    /\ extLeft' = extLeft - 1
+    /\ UNCHANGED <<sessions, nextOid, sealed, copies, nextId, branchDb, late, dumped, EnvU>>
+
+(* pg_dump -C connects to the base, so it can only read a base that is open.  The dump carries the marker. *)
+ExternalDump ==
+    /\ External /\ Reentry /\ dumped = 0 /\ Marked /\ base.open /\ base.allow
+    /\ dumped' = base.gen
+    /\ UNCHANGED <<base, sessions, nextOid, sealed, copies, nextId, branchDb, late, extLeft, parked, EnvU>>
+
+(* Restoring the dump creates a new database that carries the old marker: open, with the dumped generation. *)
+ExternalRestore ==
+    /\ External /\ Reentry /\ extLeft > 0 /\ base.st = "absent" /\ dumped # 0
+    /\ \E c \in 0..MaxContent :
+         base' = [st |-> "marked", open |-> TRUE, allow |-> TRUE, gen |-> dumped, content |-> c, oid |-> nextOid]
+    /\ nextOid' = nextOid + 1
+    /\ extLeft' = extLeft - 1
+    /\ UNCHANGED <<sessions, sealed, copies, nextId, branchDb, late, parked, dumped, EnvU>>
 
 Env == Connect \/ Disconnect \/ Migrate \/ Age \/ Expire \/ LateCreate \/ ExternalDrop \/ ExternalCreate
+       \/ ExternalPark \/ ExternalUnpark \/ ExternalDump \/ ExternalRestore
 
 Terminal == Quiescent /\ opsLeft = 0 /\ UNCHANGED vars
 
@@ -618,6 +660,7 @@ TypeOK ==
     /\ claim \in Procs \cup {NoProc} /\ fillLock \in Procs \cup {NoProc}
     /\ \A c \in copies : c.kind \in {"unmarked", "tmp", "pool"}
     /\ \A p \in Procs : cid[p] \in 0..(MaxCopies + 1)
+    /\ parked.st \in {"absent", "marked"} /\ dumped \in 0..MaxGen
 
 (* The claim lock is held only by a live process inside a multi-step section. *)
 MutexOK ==
