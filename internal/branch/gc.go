@@ -56,7 +56,7 @@ func (s *session) sweep(ctx context.Context, gen int, gc, dryRun bool) (GCResult
 		case marker.Pool:
 			return m.Gen < gen
 		case marker.Tmp:
-			return m.Gen < gen || (gc && m.Gen == gen && !m.CreatedAt.IsZero() && m.CreatedAt.Before(tmpCutoff))
+			return m.Gen < gen || (gc && !m.CreatedAt.IsZero() && m.CreatedAt.Before(tmpCutoff))
 		default:
 			return false
 		}

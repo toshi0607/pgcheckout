@@ -476,7 +476,7 @@ BCR2(p) ==
 (* gc: gc.go:25-64 *)
 GcEligible(c) ==
     \/ c.kind = "pool" /\ c.gen < base.gen
-    \/ c.kind = "tmp" /\ (c.gen < base.gen \/ (c.gen = base.gen /\ c.old))
+    \/ c.kind = "tmp" /\ (c.gen < base.gen \/ c.old)
 
 GC(p) ==
     /\ pc[p] = "gc"
