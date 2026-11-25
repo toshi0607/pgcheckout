@@ -28,7 +28,7 @@ Use the `url` field as the connection string for the current git branch. Pass a 
 pgcheckout reset
 ```
 
-Drops and recreates the current branch's database from the base. Add `--force` if sessions are still connected.
+Replaces the current branch's database with a fresh copy of the base. The old database stays until the new one is in place. Add `--force` if sessions are still connected.
 
 ```bash
 pgcheckout drop feat/x
@@ -75,7 +75,7 @@ Start the stdio server with `pgcheckout mcp`.
 | `pool_status` | Inspect pooled copies and readiness. |
 | `dsn` | Get an existing branch database's connection URL. |
 | `ensure` | Get or create a branch database idempotently. |
-| `reset` | Delete and recreate a named branch database. |
+| `reset` | Replace a named branch database with a fresh copy of the base. |
 | `drop` | Delete a named branch database. |
 | `gc` | Delete expired and obsolete databases, with a dry-run option. |
 

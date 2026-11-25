@@ -11,6 +11,7 @@ import (
 
 	"github.com/toshi0607/pgcheckout/internal/config"
 	"github.com/toshi0607/pgcheckout/internal/marker"
+	"github.com/toshi0607/pgcheckout/internal/naming"
 	"github.com/toshi0607/pgcheckout/internal/pg"
 )
 
@@ -132,6 +133,94 @@ func (s *session) renameManaged(ctx context.Context, from pg.Database, target st
 		}
 		return pg.Comment(ctx, tx, target, m)
 	})
+}
+
+type swapFailure uint8
+
+const (
+	swapOtherFailure swapFailure = iota
+	swapOldRename
+	swapReplacement
+)
+
+func (s *session) swapBranch(ctx context.Context, old, replacement pg.Database, m marker.Marker, force bool) (pg.Database, swapFailure, error) {
+	if old.Name == s.Maintenance || old.Name == s.Base || m.Kind != marker.Branch || !m.ValidFor(s.Base) {
+		return pg.Database{}, swapOtherFailure, unmanaged()
+	}
+	name, err := naming.TmpDB(s.Base)
+	if err != nil {
+		return pg.Database{}, swapOtherFailure, err
+	}
+	// Generation 0 is older than every base generation, so gc and base close drop a leftover at once.
+	retired := pg.Database{Name: name, OID: old.OID, Marker: marker.New(marker.Tmp, s.Base, 0)}
+	const maxAttempts = 5
+	for attempt := 1; ; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return pg.Database{}, swapOtherFailure, err
+		}
+		failure := swapOtherFailure
+		var err error
+		retry := false
+		if force {
+			if err := s.checkMutation(ctx, s.Conn, old, false, marker.Branch); err != nil {
+				return pg.Database{}, failure, err
+			}
+			err = pg.Terminate(ctx, s.Conn, old.Name)
+			// A session that left between the scan and the signal also fails here; the next attempt rescans.
+			retry = err != nil
+		}
+		if err == nil {
+			if err := ctx.Err(); err != nil {
+				return pg.Database{}, failure, err
+			}
+			// Each RENAME can wait about five seconds for sessions to leave.
+			transition, cancel := cleanupContextWithTimeout(ctx, 15*time.Second)
+			err = pgx.BeginFunc(transition, s.Conn, func(tx pgx.Tx) error {
+				if err := s.checkMutation(transition, tx, old, false, marker.Branch); err != nil {
+					return err
+				}
+				if err := s.checkMutation(transition, tx, replacement, false, marker.Pool, marker.Tmp); err != nil {
+					failure = swapReplacement
+					return err
+				}
+				if err := pg.Rename(transition, tx, old.Name, retired.Name); err != nil {
+					failure = swapOldRename
+					return err
+				}
+				if err := pg.Comment(transition, tx, retired.Name, retired.Marker); err != nil {
+					return err
+				}
+				if err := pg.Rename(transition, tx, replacement.Name, old.Name); err != nil {
+					failure = swapReplacement
+					return err
+				}
+				return pg.Comment(transition, tx, old.Name, m)
+			})
+			cancel()
+			if err == nil {
+				return retired, swapOtherFailure, nil
+			}
+			retry = failure == swapOldRename && pg.State(err) == "55006"
+		}
+		if !force || attempt == maxAttempts || !retry {
+			hint := ""
+			if failure == swapOldRename {
+				hint = dropInUseHint(force)
+			}
+			err = databaseError(err, hint)
+			if force {
+				if problem, ok := errors.AsType[*config.Error](err); ok && problem.Code == config.InsufficientPrivilege {
+					problem.Hint = "A session owned by another role is connected and this role may not terminate it. Retry, or disconnect that session."
+				}
+			}
+			return pg.Database{}, failure, err
+		}
+		select {
+		case <-ctx.Done():
+			return pg.Database{}, failure, ctx.Err()
+		case <-time.After(300 * time.Millisecond):
+		}
+	}
 }
 
 func (s *session) writeBase(ctx context.Context, base pg.Database, m marker.Marker, allow *bool, adopt bool) error {

@@ -167,23 +167,11 @@ func (s *session) ensureOnce(ctx context.Context, name, branch string, opts Ensu
 }
 
 func (s *session) claimPool(ctx context.Context, gen int, name, branch string, opts EnsureOptions) (EnsureResult, error) {
-	if s.Config.PoolSize == 0 {
-		return EnsureResult{}, nil
-	}
-	databases, err := s.managedDatabases(ctx)
+	databases, err := s.poolCandidates(ctx, gen)
 	if err != nil {
 		return EnsureResult{}, err
 	}
-	slices.SortFunc(databases, func(a, b pg.Database) int {
-		if order := a.Marker.CreatedAt.Compare(b.Marker.CreatedAt); order != 0 {
-			return order
-		}
-		return cmp.Compare(a.Name, b.Name)
-	})
 	for _, d := range databases {
-		if d.Marker.Kind != marker.Pool || d.Marker.Gen != gen {
-			continue
-		}
 		m := branchMarker(d.Marker, branch, opts.TTL)
 		if err := ctx.Err(); err != nil {
 			return EnsureResult{}, err
@@ -197,14 +185,39 @@ func (s *session) claimPool(ctx context.Context, gen int, name, branch string, o
 		if err != nil {
 			return EnsureResult{}, err
 		}
-		result := s.ensureResult(pg.Database{Name: name, Marker: m}, gen, "pool")
-		if m.Warnings > 0 {
-			result.Warnings = []string{fmt.Sprintf("%d per-database settings or grants could not be replicated from the base when this copy was made; run pgcheckout doctor", m.Warnings)}
-		}
+		result := s.poolClaimResult(name, m, gen)
 		s.checkRefill(ctx, &result, opts)
 		return result, nil
 	}
 	return EnsureResult{}, nil
+}
+
+func (s *session) poolCandidates(ctx context.Context, gen int) ([]pg.Database, error) {
+	if s.Config.PoolSize == 0 {
+		return nil, nil
+	}
+	databases, err := s.managedDatabases(ctx)
+	if err != nil {
+		return nil, err
+	}
+	databases = slices.DeleteFunc(databases, func(d pg.Database) bool {
+		return d.Marker.Kind != marker.Pool || d.Marker.Gen != gen
+	})
+	slices.SortFunc(databases, func(a, b pg.Database) int {
+		if order := a.Marker.CreatedAt.Compare(b.Marker.CreatedAt); order != 0 {
+			return order
+		}
+		return cmp.Compare(a.Name, b.Name)
+	})
+	return databases, nil
+}
+
+func (s *session) poolClaimResult(name string, m marker.Marker, gen int) EnsureResult {
+	result := s.ensureResult(pg.Database{Name: name, Marker: m}, gen, "pool")
+	if m.Warnings > 0 {
+		result.Warnings = []string{fmt.Sprintf("%d per-database settings or grants could not be replicated from the base when this copy was made; run pgcheckout doctor", m.Warnings)}
+	}
+	return result
 }
 
 func branchMarker(m marker.Marker, branch string, ttl *time.Duration) marker.Marker {

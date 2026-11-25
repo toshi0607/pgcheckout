@@ -118,7 +118,7 @@ Advisory locks are independent for each database you connect to. Everyone who us
 | `list` | Lists the base, branches, pools, and `unmanaged` databases |
 | `dsn [branch]` | The branch's connection string |
 | `drop [branch]` | Deletes the branch. It fails if connections remain, and `--force` cuts them and deletes |
-| `reset [branch]` | Deletes the branch and recreates it |
+| `reset [branch]` | Replaces the branch with a fresh copy of the base. It takes a pool copy or makes a copy first, then, in 1 transaction, renames the old database to a `tmp` name and the new one to the branch name, and deletes the old database afterwards. If that deletion fails, `gc` removes the leftover. If any step before that transaction fails, the branch stays as it was |
 | `pool fill` / `pool status` / `pool drain` | Fill, status, and discard of the pool |
 | `gc` | Deletes expired branches and pools of other generations. Has `--dry-run` |
 | `doctor` | Reports the server version, privileges, the selected strategy, the base state, and `unmanaged` databases |

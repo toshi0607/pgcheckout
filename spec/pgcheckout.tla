@@ -32,19 +32,18 @@ VARIABLES
     branchDb,    \* databases named <base>__<branch slug>
     late,        \* CREATE DATABASE statements still running after the client gave up
     claim, fillLock,
-    pc, op, arg, flag, seen, cid, conn, canc, res, dnext, rdrop,
+    pc, op, arg, flag, seen, cid, conn, canc, res, dnext,
     opsLeft, faultsLeft, extLeft,
     parked,      \* a marked base that was renamed away outside pgcheckout
     dumped,      \* generation written in a dump taken while the base was open (0: no dump)
     reported,    \* ghost: copies named in an error message
     excused,     \* ghost: copies owned by a crashed process
-    stuck,       \* ghost: a failed base restore was reported, or its owner crashed
-    resetLost    \* ghost: a reset dropped the branch and did not recreate it
+    stuck        \* ghost: a failed base restore was reported, or its owner crashed
 
 vars == <<base, sessions, nextOid, sealed, copies, nextId, branchDb, late,
           claim, fillLock,
-          pc, op, arg, flag, seen, cid, conn, canc, res, dnext, rdrop,
-          opsLeft, faultsLeft, extLeft, parked, dumped, reported, excused, stuck, resetLost>>
+          pc, op, arg, flag, seen, cid, conn, canc, res, dnext,
+          opsLeft, faultsLeft, extLeft, parked, dumped, reported, excused, stuck>>
 
 AbsentBase == [st |-> "absent", open |-> FALSE, allow |-> FALSE, gen |-> 0, content |-> 0, oid |-> 0]
 NoBranch   == [ex |-> FALSE, gen |-> 0, content |-> 0, exp |-> "none"]
@@ -74,6 +73,12 @@ Bad(p) == canc[p] \/ ~conn[p]                \* SQL on the session connection wi
 OwnCopy(p) == {c \in copies : c.id = cid[p] /\ c.kind = "tmp"}
 NewBranch(c, ttl) == [ex |-> TRUE, gen |-> c.gen, content |-> c.content,
                       exp |-> IF ttl THEN "live" ELSE "none"]
+
+(* reset replaces an existing branch: the old database is renamed to a tmp name and the new one takes the *)
+(* branch name in one transaction.  The old database keeps the id of the copy that replaced it, so its owner *)
+(* drops it in the discard step.  Its marker carries generation 0, so gc and base close drop a leftover at once. *)
+Replacing(p) == op[p] = "reset" /\ branchDb[arg[p]].ex
+Trash(p, c) == [c EXCEPT !.kind = "tmp", !.gen = 0, !.content = branchDb[arg[p]].content, !.old = FALSE]
 
 First(o) == CASE o = "ensure"     -> "e_claim1"
               [] o = "reset"      -> "r1"
@@ -107,10 +112,9 @@ Init ==
     /\ canc = [p \in Procs |-> FALSE]
     /\ res = [p \in Procs |-> ""]
     /\ dnext = [p \in Procs |-> "done"]
-    /\ rdrop = [p \in Procs |-> FALSE]
     /\ opsLeft = MaxOps /\ faultsLeft = MaxFaults /\ extLeft = MaxExternal
     /\ parked = AbsentBase /\ dumped = 0
-    /\ reported = {} /\ excused = {} /\ stuck = FALSE /\ resetLost = FALSE
+    /\ reported = {} /\ excused = {} /\ stuck = FALSE
 
 ---------------------------------------------------------------------------
 (* Helpers.  Finish reads branchDb', so every caller fixes branchDb' first. *)
@@ -123,23 +127,20 @@ Finish(p, r) ==
     /\ pc' = [pc EXCEPT ![p] = "done"]
     /\ res' = [res EXCEPT ![p] = r]
     /\ ReleaseLocks(p)
-    /\ resetLost' = (resetLost \/ (op[p] = "reset" /\ rdrop[p] /\ ~branchDb'[arg[p]].ex
-                                   /\ r \notin {"pool", "copy", "existing"}))
 
 Step(p, s) ==
     /\ pc' = [pc EXCEPT ![p] = s]
-    /\ UNCHANGED <<res, resetLost>>
+    /\ UNCHANGED res
 
 StepR(p, s, r) ==
     /\ pc' = [pc EXCEPT ![p] = s]
     /\ res' = [res EXCEPT ![p] = r]
-    /\ UNCHANGED resetLost
 
 ToDiscard(p, r, nx) ==
     /\ pc' = [pc EXCEPT ![p] = "discard"]
     /\ res' = [res EXCEPT ![p] = r]
     /\ dnext' = [dnext EXCEPT ![p] = nx]
-    /\ UNCHANGED <<claim, fillLock, resetLost>>
+    /\ UNCHANGED <<claim, fillLock>>
 
 See(p) == seen' = [seen EXCEPT ![p] = [gen |-> base.gen, oid |-> base.oid]]
 SeenCurrent(p) == seen[p].gen = base.gen /\ seen[p].oid = base.oid
@@ -164,32 +165,36 @@ Start(p) ==
     /\ canc' = [canc EXCEPT ![p] = FALSE]
     /\ res' = [res EXCEPT ![p] = ""]
     /\ dnext' = [dnext EXCEPT ![p] = "done"]
-    /\ rdrop' = [rdrop EXCEPT ![p] = FALSE]
     /\ opsLeft' = opsLeft - 1
     /\ UNCHANGED <<base, sessions, nextOid, sealed, copies, nextId, branchDb, late,
-                   claim, fillLock, faultsLeft, extLeft, parked, dumped, reported, excused, stuck, resetLost>>
+                   claim, fillLock, faultsLeft, extLeft, parked, dumped, reported, excused, stuck>>
 
-(* ensure, first claim section: ensure.go:75-98 and claimPool, ensure.go:169-208 *)
+(* ensure, first claim section: ensure.go:75-98 and claimPool, ensure.go:169-221 *)
 EClaim1(p) ==
     /\ pc[p] = "e_claim1"
-    /\ UNCHANGED <<base, sessions, nextOid, sealed, nextId, late, cid, dnext, rdrop>>
+    /\ UNCHANGED <<base, sessions, nextOid, sealed, nextId, late>>
     /\ UNCHANGED <<Params, Counters, Ghosts>>
     /\ IF Bad(p)
-       THEN UNCHANGED <<copies, branchDb, seen>> /\ Finish(p, "error")
+       THEN UNCHANGED <<copies, branchDb, seen, cid, dnext>> /\ Finish(p, "error")
        ELSE /\ claim = NoProc
             /\ IF ~Marked
-               THEN UNCHANGED <<copies, branchDb, seen>> /\ Finish(p, "no_base")
-               ELSE IF branchDb[arg[p]].ex
-               THEN UNCHANGED <<copies, branchDb, seen>> /\ Finish(p, "existing")
+               THEN UNCHANGED <<copies, branchDb, seen, cid, dnext>> /\ Finish(p, "no_base")
+               ELSE IF branchDb[arg[p]].ex /\ op[p] # "reset"
+               THEN UNCHANGED <<copies, branchDb, seen, cid, dnext>> /\ Finish(p, "existing")
                ELSE IF Openish
-               THEN UNCHANGED <<copies, branchDb, seen>> /\ Finish(p, "base_open")
+               THEN UNCHANGED <<copies, branchDb, seen, cid, dnext>> /\ Finish(p, "base_open")
                ELSE IF PoolTarget > 0 /\ ReadyPool # {}
                THEN \E c \in ReadyPool :
-                      /\ copies' = copies \ {c}
                       /\ branchDb' = [branchDb EXCEPT ![arg[p]] = NewBranch(c, flag[p])]
                       /\ UNCHANGED seen
-                      /\ Finish(p, "pool")
-               ELSE /\ UNCHANGED <<copies, branchDb, claim, fillLock>>
+                      /\ IF Replacing(p)
+                         THEN /\ copies' = (copies \ {c}) \cup {Trash(p, c)}
+                              /\ cid' = [cid EXCEPT ![p] = c.id]
+                              /\ ToDiscard(p, "pool", "done")
+                         ELSE /\ copies' = copies \ {c}
+                              /\ UNCHANGED <<cid, dnext>>
+                              /\ Finish(p, "pool")
+               ELSE /\ UNCHANGED <<copies, branchDb, claim, fillLock, cid, dnext>>
                     /\ See(p)
                     /\ Step(p, "create")
 
@@ -203,7 +208,7 @@ CopyCreate(p) ==
                    old |-> FALSE]
     IN
     /\ pc[p] = "create"
-    /\ UNCHANGED <<base, sessions, nextOid, sealed, branchDb, seen, dnext, rdrop>>
+    /\ UNCHANGED <<base, sessions, nextOid, sealed, branchDb, seen, dnext>>
     /\ UNCHANGED <<Params, Counters, excused, stuck>>
     /\ IF ~Bad(p)
        THEN IF srcOK
@@ -239,7 +244,7 @@ CopyMark(p) ==
         marked == {IF c.id = cid[p] THEN [c EXCEPT !.kind = "tmp"] ELSE c : c \in copies}
     IN
     /\ pc[p] = "mark"
-    /\ UNCHANGED <<base, sessions, nextOid, sealed, nextId, branchDb, late, seen, rdrop>>
+    /\ UNCHANGED <<base, sessions, nextOid, sealed, nextId, branchDb, late, seen>>
     /\ UNCHANGED <<Params, Counters, excused, stuck>>
     /\ IF ~Bad(p)
        THEN /\ copies' = marked
@@ -255,10 +260,10 @@ CopyMark(p) ==
                /\ UNCHANGED <<copies, dnext>>
                /\ Finish(p, "error_unmarked")
 
-(* discardCopy: mutation.go:158-176.  It uses a cleanup context and reconnects if needed. *)
+(* discardCopy: mutation.go:247-265.  It uses a cleanup context and reconnects if needed. *)
 Discard(p) ==
     /\ pc[p] = "discard"
-    /\ UNCHANGED <<base, sessions, nextOid, sealed, nextId, branchDb, late, seen, dnext, rdrop>>
+    /\ UNCHANGED <<base, sessions, nextOid, sealed, nextId, branchDb, late, seen, dnext>>
     /\ UNCHANGED <<Params, Counters, excused, stuck>>
     /\ cid' = [cid EXCEPT ![p] = 0]
     /\ \/ /\ copies' = copies \ OwnCopy(p)
@@ -273,14 +278,14 @@ Discard(p) ==
 (* ensure, second claim section: ensure.go:117-167 *)
 EClaim2(p) ==
     /\ pc[p] = "e_claim2"
-    /\ UNCHANGED <<base, sessions, nextOid, sealed, nextId, late, seen, rdrop>>
+    /\ UNCHANGED <<base, sessions, nextOid, sealed, nextId, late, seen>>
     /\ UNCHANGED <<Params, Counters, Ghosts>>
     /\ IF Bad(p)
        THEN UNCHANGED <<copies, branchDb, cid>> /\ ToDiscard(p, "error", "done")
        ELSE /\ claim = NoProc
             /\ IF ~Marked
                THEN UNCHANGED <<copies, branchDb, cid>> /\ ToDiscard(p, "no_base", "done")
-               ELSE IF branchDb[arg[p]].ex
+               ELSE IF branchDb[arg[p]].ex /\ op[p] # "reset"
                THEN UNCHANGED <<copies, branchDb, cid>> /\ ToDiscard(p, "existing", "done")
                ELSE IF Openish
                THEN UNCHANGED <<copies, branchDb, cid>> /\ ToDiscard(p, "base_open", "done")
@@ -288,37 +293,39 @@ EClaim2(p) ==
                THEN UNCHANGED <<copies, branchDb, cid>> /\ ToDiscard(p, "", "e_claim1")
                ELSE IF OwnCopy(p) # {}
                THEN \E c \in OwnCopy(p) :
-                      /\ copies' = copies \ {c}
                       /\ branchDb' = [branchDb EXCEPT ![arg[p]] = NewBranch(c, flag[p])]
-                      /\ cid' = [cid EXCEPT ![p] = 0]
-                      /\ UNCHANGED dnext
-                      /\ Finish(p, "copy")
+                      /\ IF Replacing(p)
+                         THEN /\ copies' = (copies \ {c}) \cup {Trash(p, c)}
+                              /\ UNCHANGED cid
+                              /\ ToDiscard(p, "copy", "done")
+                         ELSE /\ copies' = copies \ {c}
+                              /\ cid' = [cid EXCEPT ![p] = 0]
+                              /\ UNCHANGED dnext
+                              /\ Finish(p, "copy")
                ELSE \* The copy was swept by base close, gc or pool drain: retry.
                     /\ UNCHANGED <<copies, branchDb, dnext, claim, fillLock>>
                     /\ cid' = [cid EXCEPT ![p] = 0]
                     /\ Step(p, "e_claim1")
 
-(* reset: lifecycle.go:66-97 *)
+(* reset, first check: lifecycle.go.  The branch is not touched here; it is replaced later in one transaction. *)
 R1(p) ==
     /\ pc[p] = "r1"
-    /\ UNCHANGED <<base, sessions, nextOid, sealed, copies, nextId, late, seen, cid, dnext>>
+    /\ UNCHANGED <<base, sessions, nextOid, sealed, copies, nextId, branchDb, late, seen, cid, dnext>>
     /\ UNCHANGED <<Params, Counters, Ghosts>>
     /\ IF Bad(p)
-       THEN UNCHANGED <<branchDb, rdrop>> /\ Finish(p, "error")
+       THEN Finish(p, "error")
        ELSE /\ claim = NoProc
             /\ IF ~Marked
-               THEN UNCHANGED <<branchDb, rdrop>> /\ Finish(p, "no_base")
+               THEN Finish(p, "no_base")
                ELSE IF Openish
-               THEN UNCHANGED <<branchDb, rdrop>> /\ Finish(p, "base_open")
-               ELSE /\ rdrop' = [rdrop EXCEPT ![p] = branchDb[arg[p]].ex]
-                    /\ branchDb' = [branchDb EXCEPT ![arg[p]] = NoBranch]
-                    /\ UNCHANGED <<claim, fillLock>>
+               THEN Finish(p, "base_open")
+               ELSE /\ UNCHANGED <<claim, fillLock>>
                     /\ Step(p, "e_claim1")
 
-(* drop: lifecycle.go:48-64 *)
+(* drop: lifecycle.go:52-68 *)
 Drop(p) ==
     /\ pc[p] = "drop"
-    /\ UNCHANGED <<base, sessions, nextOid, sealed, copies, nextId, late, seen, cid, dnext, rdrop>>
+    /\ UNCHANGED <<base, sessions, nextOid, sealed, copies, nextId, late, seen, cid, dnext>>
     /\ UNCHANGED <<Params, Counters, Ghosts>>
     /\ IF Bad(p)
        THEN UNCHANGED branchDb /\ Finish(p, "error")
@@ -332,7 +339,7 @@ Drop(p) ==
 (* pool fill: pool.go:48-148 *)
 FLock(p) ==
     /\ pc[p] = "f_lock"
-    /\ UNCHANGED <<base, sessions, nextOid, sealed, copies, nextId, branchDb, late, seen, cid, dnext, rdrop>>
+    /\ UNCHANGED <<base, sessions, nextOid, sealed, copies, nextId, branchDb, late, seen, cid, dnext>>
     /\ UNCHANGED <<Params, Counters, Ghosts>>
     /\ IF Bad(p) THEN Finish(p, "error")
        ELSE IF fillLock # NoProc THEN Finish(p, "skipped")
@@ -340,7 +347,7 @@ FLock(p) ==
 
 FClaim1(p) ==
     /\ pc[p] = "f_claim1"
-    /\ UNCHANGED <<base, sessions, nextOid, sealed, copies, nextId, branchDb, late, cid, dnext, rdrop>>
+    /\ UNCHANGED <<base, sessions, nextOid, sealed, copies, nextId, branchDb, late, cid, dnext>>
     /\ UNCHANGED <<Params, Counters, Ghosts>>
     /\ IF Bad(p)
        THEN UNCHANGED seen /\ Finish(p, "error")
@@ -352,7 +359,7 @@ FClaim1(p) ==
 
 FClaim2(p) ==
     /\ pc[p] = "f_claim2"
-    /\ UNCHANGED <<base, sessions, nextOid, sealed, nextId, branchDb, late, seen, rdrop>>
+    /\ UNCHANGED <<base, sessions, nextOid, sealed, nextId, branchDb, late, seen>>
     /\ UNCHANGED <<Params, Counters, Ghosts>>
     /\ IF Bad(p)
        THEN UNCHANGED <<copies, cid>> /\ ToDiscard(p, "error", "done")
@@ -369,7 +376,7 @@ FClaim2(p) ==
 (* base open: base.go:198-217 *)
 BaseOpen(p) ==
     /\ pc[p] = "bo"
-    /\ UNCHANGED <<sessions, nextOid, sealed, copies, nextId, branchDb, late, seen, cid, dnext, rdrop>>
+    /\ UNCHANGED <<sessions, nextOid, sealed, copies, nextId, branchDb, late, seen, cid, dnext>>
     /\ UNCHANGED <<Params, Counters, Ghosts>>
     /\ IF Bad(p) THEN UNCHANGED base /\ Finish(p, "error")
        ELSE /\ claim = NoProc
@@ -379,7 +386,7 @@ BaseOpen(p) ==
 (* base close, first write: base.go:203-226 and closeBase, base.go:244-263 *)
 BC1(p) ==
     /\ pc[p] = "bc1"
-    /\ UNCHANGED <<nextOid, sealed, copies, nextId, branchDb, late, cid, dnext, rdrop>>
+    /\ UNCHANGED <<nextOid, sealed, copies, nextId, branchDb, late, cid, dnext>>
     /\ UNCHANGED <<Params, Counters, Ghosts>>
     /\ IF Bad(p) THEN UNCHANGED <<base, sessions, seen>> /\ Finish(p, "error")
        ELSE /\ claim = NoProc
@@ -394,7 +401,7 @@ BC1(p) ==
 (* base adopt, first write: base.go:146-188 and closeBase with adopt *)
 BA1(p) ==
     /\ pc[p] = "ba1"
-    /\ UNCHANGED <<nextOid, sealed, copies, nextId, branchDb, late, cid, dnext, rdrop>>
+    /\ UNCHANGED <<nextOid, sealed, copies, nextId, branchDb, late, cid, dnext>>
     /\ UNCHANGED <<Params, Counters, Ghosts>>
     /\ IF Bad(p) THEN UNCHANGED <<base, sessions, seen>> /\ Finish(p, "error")
        ELSE /\ claim = NoProc
@@ -410,14 +417,14 @@ BA1(p) ==
 (* checkClosedSessions: base.go:320-351 *)
 BC2(p) ==
     /\ pc[p] = "bc2"
-    /\ UNCHANGED <<base, nextOid, sealed, copies, nextId, branchDb, late, seen, cid, dnext, rdrop>>
+    /\ UNCHANGED <<base, nextOid, sealed, copies, nextId, branchDb, late, seen, cid, dnext>>
     /\ UNCHANGED <<Params, Counters, Ghosts, claim, fillLock>>
     /\ IF Bad(p) THEN UNCHANGED sessions /\ StepR(p, "brestore", "error")
        ELSE IF flag[p] THEN sessions' = 0 /\ Step(p, "bc3")
        ELSE IF sessions = 0 THEN UNCHANGED sessions /\ Step(p, "bc3")
        ELSE UNCHANGED sessions /\ StepR(p, "brestore", "in_use")
 
-BaseMatch(p) == Closing /\ SeenCurrent(p)    \* checkMutation, mutation.go:24-53
+BaseMatch(p) == Closing /\ SeenCurrent(p)    \* checkMutation, mutation.go:25-54
 
 (* finishBaseClose, final write, then the stale pool sweep: base.go:271-288, 194-201, gc.go:39-64 *)
 BC3(p) ==
@@ -425,7 +432,7 @@ BC3(p) ==
         swept == {c \in copies : ~((c.kind = "pool" /\ c.gen # ng) \/ (c.kind = "tmp" /\ c.gen < ng))}
     IN
     /\ pc[p] = "bc3"
-    /\ UNCHANGED <<sessions, nextOid, nextId, branchDb, late, seen, cid, dnext, rdrop>>
+    /\ UNCHANGED <<sessions, nextOid, nextId, branchDb, late, seen, cid, dnext>>
     /\ UNCHANGED <<Params, Counters, Ghosts>>
     /\ IF ~Bad(p) /\ BaseMatch(p)
        THEN /\ base' = [base EXCEPT !.open = FALSE, !.gen = ng]
@@ -439,7 +446,7 @@ BC3(p) ==
 (* finishBaseClose, restore: base.go:292-317.  Runs on a new connection, without the lock, after a loss. *)
 BRestore(p) ==
     /\ pc[p] = "brestore"
-    /\ UNCHANGED <<sessions, nextOid, sealed, copies, nextId, branchDb, late, seen, cid, dnext, rdrop>>
+    /\ UNCHANGED <<sessions, nextOid, sealed, copies, nextId, branchDb, late, seen, cid, dnext>>
     /\ UNCHANGED <<Params, Counters, reported, excused>>
     /\ \/ /\ BaseMatch(p)
           /\ base' = IF op[p] = "adopt"
@@ -455,7 +462,7 @@ BRestore(p) ==
 (* base create: base.go:62-144.  The claim lock is held from the first lookup to the rename. *)
 BCR1(p) ==
     /\ pc[p] = "bcr1"
-    /\ UNCHANGED <<base, sessions, nextOid, sealed, copies, nextId, branchDb, late, cid, dnext, rdrop>>
+    /\ UNCHANGED <<base, sessions, nextOid, sealed, copies, nextId, branchDb, late, cid, dnext>>
     /\ UNCHANGED <<Params, Counters, Ghosts>>
     /\ IF Bad(p) THEN UNCHANGED seen /\ Finish(p, "error")
        ELSE /\ claim = NoProc
@@ -466,7 +473,7 @@ BCR1(p) ==
 
 BCR2(p) ==
     /\ pc[p] = "bcr2"
-    /\ UNCHANGED <<sessions, nextId, branchDb, late, seen, rdrop>>
+    /\ UNCHANGED <<sessions, nextId, branchDb, late, seen>>
     /\ UNCHANGED <<Params, Counters, Ghosts>>
     /\ IF ~Bad(p) /\ base.st = "absent" /\ OwnCopy(p) # {}
        THEN \E c \in OwnCopy(p) :
@@ -488,7 +495,7 @@ GcEligible(c) ==
 
 GC(p) ==
     /\ pc[p] = "gc"
-    /\ UNCHANGED <<base, sessions, nextOid, sealed, nextId, late, seen, cid, dnext, rdrop>>
+    /\ UNCHANGED <<base, sessions, nextOid, sealed, nextId, late, seen, cid, dnext>>
     /\ UNCHANGED <<Params, Counters, Ghosts>>
     /\ IF Bad(p) THEN UNCHANGED <<copies, branchDb>> /\ Finish(p, "error")
        ELSE /\ claim = NoProc
@@ -501,7 +508,7 @@ GC(p) ==
 (* pool drain: pool.go:173-191 *)
 Drain(p) ==
     /\ pc[p] = "drain"
-    /\ UNCHANGED <<base, sessions, nextOid, sealed, nextId, branchDb, late, seen, cid, dnext, rdrop>>
+    /\ UNCHANGED <<base, sessions, nextOid, sealed, nextId, branchDb, late, seen, cid, dnext>>
     /\ UNCHANGED <<Params, Counters, Ghosts>>
     /\ IF Bad(p) THEN UNCHANGED copies /\ Finish(p, "error")
        ELSE /\ claim = NoProc
@@ -517,14 +524,14 @@ ProcStep(p) ==
 ---------------------------------------------------------------------------
 (* Faults *)
 
-PV == <<op, arg, flag, seen, cid, dnext, rdrop>>
+PV == <<op, arg, flag, seen, cid, dnext>>
 DB == <<base, sessions, nextOid, sealed, copies, nextId, branchDb, late>>
 
 Cancel(p) ==
     /\ "cancel" \in Faults /\ faultsLeft > 0 /\ Running(p) /\ ~canc[p]
     /\ canc' = [canc EXCEPT ![p] = TRUE]
     /\ faultsLeft' = faultsLeft - 1
-    /\ UNCHANGED <<DB, PV, claim, fillLock, pc, conn, res, opsLeft, extLeft, parked, dumped, Ghosts, resetLost>>
+    /\ UNCHANGED <<DB, PV, claim, fillLock, pc, conn, res, opsLeft, extLeft, parked, dumped, Ghosts>>
 
 (* Advisory locks are session-scoped, so a lost connection releases them. *)
 ConnLoss(p) ==
@@ -532,7 +539,7 @@ ConnLoss(p) ==
     /\ conn' = [conn EXCEPT ![p] = FALSE]
     /\ ReleaseLocks(p)
     /\ faultsLeft' = faultsLeft - 1
-    /\ UNCHANGED <<DB, PV, pc, canc, res, opsLeft, extLeft, parked, dumped, Ghosts, resetLost>>
+    /\ UNCHANGED <<DB, PV, pc, canc, res, opsLeft, extLeft, parked, dumped, Ghosts>>
 
 Crash(p) ==
     LET srcOK == op[p] = "basecreate" \/ (base.st # "absent" /\ sessions = 0)
@@ -555,8 +562,8 @@ Crash(p) ==
 ---------------------------------------------------------------------------
 (* Environment *)
 
-EnvU == <<claim, fillLock, pc, op, arg, flag, seen, cid, conn, canc, res, dnext, rdrop,
-          opsLeft, faultsLeft, reported, excused, stuck, resetLost>>
+EnvU == <<claim, fillLock, pc, op, arg, flag, seen, cid, conn, canc, res, dnext,
+          opsLeft, faultsLeft, reported, excused, stuck>>
 
 Connect ==
     /\ base.st # "absent" /\ base.allow /\ sessions = 0
@@ -703,18 +710,23 @@ NoSilentLeak ==
 (* The base is not left half closed without a report. *)
 ClosingReported == Quiescent /\ Closing => stuck
 
-(* Expected to be violated: reset is a drop followed by an ensure, not one step. *)
-ResetAtomic == ~resetLost
-
 ---------------------------------------------------------------------------
 (* Action properties *)
 
 SealedImmutable == [][\A g \in DOMAIN sealed : sealed[g] # -1 => sealed'[g] = sealed[g]]_vars
 BaseKept        == [][base.st # "absent" => base'.st # "absent"]_vars
 GenMonotonic    == [][base.st = "marked" /\ base'.st = "marked" => base'.gen >= base.gen]_vars
+(* A branch database disappears only through drop or gc.  reset replaces it without a gap. *)
+BranchKept      == [][\A b \in Branches : branchDb[b].ex /\ ~branchDb'[b].ex =>
+                        \E p \in Procs : pc[p] \in {"drop", "gc"} /\ pc'[p] = "done"]_vars
+(* Only reset rewrites an existing branch, by swapping in a copy of the current base. *)
 BranchStable    == [][\A b \in Branches : branchDb[b].ex /\ branchDb'[b].ex =>
-                        /\ branchDb'[b].gen = branchDb[b].gen
-                        /\ branchDb'[b].content = branchDb[b].content]_vars
+                        \/ /\ branchDb'[b].gen = branchDb[b].gen
+                           /\ branchDb'[b].content = branchDb[b].content
+                        \/ \E p \in Procs : /\ op[p] = "reset" /\ arg[p] = b
+                                            /\ pc[p] \in {"e_claim1", "e_claim2"} /\ pc'[p] = "discard"
+                                            /\ branchDb'[b].gen = base.gen
+                                            /\ branchDb'[b].content = base.content]_vars
 
 ---------------------------------------------------------------------------
 (* Reachability probes: each is expected to be violated, which shows the state is reachable. *)

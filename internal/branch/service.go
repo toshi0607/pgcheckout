@@ -187,7 +187,11 @@ func maintenanceError() *config.Error {
 }
 
 func cleanupContext(ctx context.Context) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	return cleanupContextWithTimeout(ctx, 5*time.Second)
+}
+
+func cleanupContextWithTimeout(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), timeout)
 }
 
 func (s *session) lock(ctx context.Context, purpose string, try bool, warnings *[]string, fn func() error) (acquired bool, err error) {
