@@ -200,10 +200,9 @@ func countPool(dbs []pg.Database, gen, target int) PoolCounts {
 		if d.Marker.Kind != marker.Pool {
 			continue
 		}
-		switch {
-		case d.Marker.Gen == gen:
+		if d.Marker.Gen == gen {
 			result.Ready++
-		case d.Marker.Gen < gen:
+		} else {
 			result.Stale++
 		}
 	}

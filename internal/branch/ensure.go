@@ -220,7 +220,7 @@ func branchMarker(m marker.Marker, branch string, ttl *time.Duration) marker.Mar
 func (s *session) ensureResult(db pg.Database, gen int, source string) EnsureResult {
 	return EnsureResult{
 		DSNResult: s.dsnResult(db), Source: source, Created: source != "existing",
-		Gen: db.Marker.Gen, BaseGen: gen, Stale: db.Marker.Gen < gen,
+		Gen: db.Marker.Gen, BaseGen: gen, Stale: db.Marker.Gen != gen,
 		Strategy: db.Marker.Strategy, ExpiresAt: db.Marker.ExpiresAt,
 	}
 }

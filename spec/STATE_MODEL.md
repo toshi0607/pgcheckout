@@ -39,19 +39,19 @@ The state of the base is decided by four things: whether the database with the b
 
 | Transition | Operation that causes it | Condition | Code |
 |---|---|---|---|
-| absent → closed (first generation) | `base create` | Finish copying to `tmp`, blocking connections, and confirming that no connections exist, then rename | `base.go:93-125` |
-| unmarked → closing (first generation) | `base adopt` | No marker exists | `base.go:164-169`, `base.go:239-241` |
-| open → closing | `base close` | A marker exists and the base is not closed | `base.go:209`, `base.go:239-241` |
-| closing → closed | `base close`, `base adopt` | Zero connections, not canceled, and the catalog matches what was written. `base close` increments the generation by 1 | `base.go:262-273` |
-| closing → open | Failure of `base close` | Connections remain, cancellation, or loss of the connection | `base.go:278-288` |
-| closing → unmarked | Failure of `base adopt` | Same as above. The comment and whether connections are allowed are restored | `base.go:281-285` |
-| closed → open, closing → open | `base open` | A marker exists | `base.go:203-207` |
+| absent → closed (first generation) | `base create` | Finish copying to `tmp`, blocking connections, and confirming that no connections exist, then rename | `base.go:103-135` |
+| unmarked → closing (first generation) | `base adopt` | No marker exists | `base.go:174-179`, `base.go:253-260` |
+| open → closing | `base close` | A marker exists and the base is not closed | `base.go:224`, `base.go:253-260` |
+| closing → closed | `base close`, `base adopt` | Zero connections, not canceled, and the catalog matches what was written. `base close` increments the generation by 1 | `base.go:278-287` |
+| closing → open | Failure of `base close` | Connections remain, cancellation, or loss of the connection | `base.go:292-302` |
+| closing → unmarked | Failure of `base adopt` | Same as above. The comment and whether connections are allowed are restored | `base.go:295-299` |
+| closed → open, closing → open | `base open` | A marker exists | `base.go:213-217` |
 
-The first generation is the maximum generation remaining among the pools and branches with the same base name, plus 1. If none remain, it is 1 (`firstGen`, `base.go:39-52`). This prevents generations from overlapping with copies of a previous base when the base is dropped outside pgcheckout and created again.
+The first generation is the maximum generation remaining among the pools and branches with the same base name, plus 1. If none remain, it is 1 (`firstGen`, `base.go:39-61`). This prevents generations from overlapping with copies of a previous base when the base is dropped outside pgcheckout and created again.
 
 "closing" is the state between blocking connections and finishing counting connections. Blocking connections does not disconnect existing connections, so blocking and updating the generation cannot be a single write. During this state `open` is still true, so no copy starts.
 
-The base stays in "closing" in two cases: when the write that restores it also fails, and when the process crashes. In the former case the error contains `could not restore base database` (`base.go:289-302`). In either case, running `base open` or `base close` again leaves the state.
+The base stays in "closing" in two cases: when the write that restores it also fails, and when the process crashes. In the former case the error contains `could not restore base database` (`base.go:303-316`). In either case, running `base open` or `base close` again leaves the state.
 
 ## 2. Copies (`tmp` and pool)
 
@@ -64,13 +64,13 @@ A copy is created with `CREATE DATABASE ... TEMPLATE`, and its name changes as t
 | unmarked → `tmp` (left behind) | Same operations | After the client gives up on `CREATE`, another connection finds the copy and marks it. It is not deleted | `copy.go:35-48`, `copy.go:101-136` |
 | `tmp` → branch | `ensure`, `reset` | Inside the lock: the base OID and generation are the same as when the copy started, the base is closed, and the branch does not exist yet | `ensure.go:117-156` |
 | `tmp` → pool | `pool fill` | Inside the lock: the base OID and generation are the same, and the base is closed | `pool.go:117-143` |
-| `tmp` → base | `base create` | See the base table above | `base.go:119-125` |
+| `tmp` → base | `base create` | See the base table above | `base.go:129-135` |
 | `tmp` → absent | The operation that created it | It could not be published | `mutation.go:158-176` |
 | `tmp` → absent | `base close`, `gc` | The generation is older than the base | `gc.go:58-59` |
 | `tmp` → absent | `gc` | The generation is the same as or newer than the base, and more than 1 hour has passed since creation | `gc.go:59` |
 | `tmp` → absent | `pool drain` | Unconditional | `pool.go:183-185` |
 | pool → branch | `ensure`, `reset` | Inside the lock: the generation is the same as the base | `ensure.go:183-205` |
-| pool → absent | `base close`, `gc` | The generation is older than the base | `gc.go:56-57` |
+| pool → absent | `base close`, `gc` | The generation differs from the base | `gc.go:56-57` |
 | pool → absent | `pool drain` | Unconditional | `pool.go:183-185` |
 
 The rename and the marker rewrite go into one transaction, and the transaction begins by checking the catalog again (`mutation.go:122-135`). A deletion also checks the catalog immediately beforehand (`mutation.go:70`). No transition deletes a database that has no marker.
@@ -103,14 +103,14 @@ An operation that spans multiple statements moves through the following position
 | | `f_claim1` | Count the pool | Inside | `pool.go:78-90` |
 | | `create`, `mark` | Same as `ensure` | Outside | `pool.go:99` |
 | | `f_claim2` | Check again, rename, and return to `f_claim1` | Inside | `pool.go:117-143` |
-| `base close` | `bc1` | Block connections | Acquire | `base.go:193-209`, `base.go:230-244` |
-| | `bc2` | Count connections | Inside | `base.go:306-337` |
-| | `bc3` | Increment the generation, close, and delete old copies | Release | `base.go:262-273`, `base.go:216-223` |
-| | `brestore` | Return to the open state | Release | `base.go:278-303` |
-| `base adopt` | `ba1` | Decide the first generation, write the marker, and block connections. Continues from `bc2` | Acquire | `base.go:145-169` |
-| `base create` | `bcr1` | Confirm that the name is free and decide the first generation | Acquire | `base.go:65-85` |
-| | `create`, `mark` | Same as `ensure` | Inside | `base.go:93` |
-| | `bcr2` | Block connections and rename | Release | `base.go:101-125` |
+| `base close` | `bc1` | Block connections | Acquire | `base.go:203-224`, `base.go:244-263` |
+| | `bc2` | Count connections | Inside | `base.go:320-351` |
+| | `bc3` | Move to the next generation, close, and delete copies of other generations | Release | `base.go:278-287`, `base.go:230-237` |
+| | `brestore` | Return to the open state | Release | `base.go:292-317` |
+| `base adopt` | `ba1` | Decide the first generation, write the marker, and block connections. Continues from `bc2` | Acquire | `base.go:155-179` |
+| `base create` | `bcr1` | Confirm that the name is free and decide the first generation | Acquire | `base.go:74-94` |
+| | `create`, `mark` | Same as `ensure` | Inside | `base.go:103` |
+| | `bcr2` | Block connections and rename | Release | `base.go:111-135` |
 | `drop`, `gc`, `pool drain`, `base open` | One | The transitions in the tables above | Inside | — |
 
 `ensure` and `pool fill` release the lock during copying. During that time the base can be opened, changed, and closed. Comparing the OID and generation inside the second lock is what discards the copy in that case (`ensure.go:133`, `pool.go:122`).
@@ -126,7 +126,7 @@ An operation that spans multiple statements moves through the following position
 | disconnected | Loss of the connection | Statements that use the original connection fail. Cleanup runs on a new connection | `service.go:120-135` |
 | finished | Completion, crash | No cleanup after a crash | — |
 
-Cleanup means three things: deleting the copy (`discardCopy`), the write that restores the base, and re-attaching the marker. Cancellation is checked explicitly just before statements that change state. There are 9 such places: before the rename (`ensure.go:138`, `ensure.go:188`, `pool.go:128`, `base.go:116`), before blocking connections (`base.go:101`, `base.go:235`), before returning a copy (`copy.go:69`), and before counting connections and before incrementing the generation (`base.go:256`, `base.go:263`). Writes after the check use a separate context, so cancellation does not stop them.
+Cleanup means three things: deleting the copy (`discardCopy`), the write that restores the base, and re-attaching the marker. Cancellation is checked explicitly just before statements that change state. There are 9 such places: before the rename (`ensure.go:138`, `ensure.go:188`, `pool.go:128`, `base.go:126`), before blocking connections (`base.go:111`, `base.go:249`), before returning a copy (`copy.go:69`), and before counting connections and before incrementing the generation (`base.go:272`, `base.go:279`). Writes after the check use a separate context, so cancellation does not stop them.
 
 `CREATE DATABASE` can keep running on the server after the client gives up. If, from another connection, the original backend still appears to be running, the copy can appear later, so the error includes the name (`copy.go:106-117`).
 
@@ -210,7 +210,7 @@ The properties checked in the TLA+ specification are listed below. The names are
 ## What the model omits
 
 - The contents of a database are represented by a single integer (the content version).
-- Re-applying settings and privileges (`pg/settings.go`, `pg/acl.go`) is not represented. Most failures there become only warnings, but if revoking privileges from PUBLIC fails, the copy is discarded and the operation fails (`ensure.go:110-113`, `base.go:97-100`, `pool.go:108-115`). This path has the same shape as the path that fails after writing the marker and discards the copy, so it is not modeled as a separate transition.
+- Re-applying settings and privileges (`pg/settings.go`, `pg/acl.go`) is not represented. Most failures there become only warnings, but if revoking privileges from PUBLIC fails, the copy is discarded and the operation fails (`ensure.go:110-113`, `base.go:107-110`, `pool.go:108-115`). This path has the same shape as the path that fails after writing the marker and discards the copy, so it is not modeled as a separate transition.
 - Connections to branches and pool copies are not represented. This excludes the case where connections remain and the deletion returns `database_in_use`, and the retry with forced deletion.
 - Databases whose marker points to a different base, whose marker is corrupted, or which match the naming rule but have no marker are not represented. No transition in the code changes them.
 - Collisions in the random part of a name are not represented.
@@ -237,8 +237,9 @@ With TLC 2.19 (tla2tools.jar v1.7.4), all reachable states of the following conf
 | `union-faults` | 2 | 1 | 3 | 2 | 2 in total across the 3 kinds | 3,911,951 | No violation |
 | `external` | 2 | 1 | 4 | 3 | None | 2,522,533 | No violation |
 | `external-faults` | 2 | 1 | 4 | 3 | 1 in total across the 3 kinds | 33,309,473 | No violation |
+| `reentry` | 2 | 1 | 4 | 3 | None | 29,139,569 | No violation |
 
-`normal` and the configurations with faults start from a state where a closed base exists, and use `ensure`, `reset`, `drop`, `pool fill`, `base open`, `base close`, `gc`, and `pool drain`. The configurations with `lifecycle` in the name start from the absent and unmarked states, and add `base create` and `base adopt`. `union` and `union-faults` start from all three initial states and use all 10 kinds of operations. `external` and `external-faults` start from a state where a closed base exists, and add up to 2 drops and recreations of the base outside pgcheckout in total (which appear as an unmarked database). The operations used are `ensure`, `pool fill`, `base open`, `base close`, `base adopt`, and `base create`, and the properties checked are `MutexOK`, `BaseProtected`, `MarkerAgrees`, `Fresh`, `FreshCurrent`, `NoFutureGen`, and `PoolBound`. In every configuration, the pool target is 1 and the content version is 0 or 1 (up to 2 for `normal`).
+`normal` and the configurations with faults start from a state where a closed base exists, and use `ensure`, `reset`, `drop`, `pool fill`, `base open`, `base close`, `gc`, and `pool drain`. The configurations with `lifecycle` in the name start from the absent and unmarked states, and add `base create` and `base adopt`. `union` and `union-faults` start from all three initial states and use all 10 kinds of operations. `external` and `external-faults` start from a state where a closed base exists, and add up to 2 drops and recreations of the base outside pgcheckout in total (which appear as an unmarked database). The operations used are `ensure`, `pool fill`, `base open`, `base close`, `base adopt`, and `base create`, and the properties checked are `MutexOK`, `BaseProtected`, `MarkerAgrees`, `Fresh`, `FreshCurrent`, `NoFutureGen`, and `PoolBound`. `reentry` adds, to the operations of `external`, a marked base that is renamed away and back and a base restored from a dump taken while it was open, with up to 3 external operations in total. It checks the same properties except `NoFutureGen`, which a returning base violates by design. In every configuration, the pool target is 1 and the content version is 0 or 1 (up to 2 for `normal`).
 
 What was verified is safety within these bounds, and that there is no state in which processes wait for each other and cannot proceed. Nothing is established for a number of processes or operations beyond these bounds.
 
@@ -251,16 +252,17 @@ Conditions in the specification were removed one at a time, and TLC was confirme
 | The OID and generation comparison inside the second lock of `ensure` | `ensure.go:133` | `Fresh` |
 | The check, inside the second lock of `ensure`, of whether the base is open | `ensure.go:130` | `Fresh` |
 | The OID and generation comparison inside the second lock of `pool fill` | `pool.go:122` | `Fresh` |
-| The recount of connections in `base close` | `base.go:259` | `BaseProtected` |
+| The recount of connections in `base close` | `base.go:275` | `BaseProtected` |
 | The catalog check just before the final write of `base close` | `mutation.go:145` | `MarkerAgrees` |
-| The generation update in `base close` | `base.go:268-270` | `SealedImmutable` |
+| The generation update in `base close` | `base.go:284-284` | `SealedImmutable` |
 | Mutual exclusion of the `fill` lock | `pool.go:55` | `PoolBound` |
 | Deleting a copy that was not used | `mutation.go:158-176` | `NoSilentLeak` |
 | Including the name of a left-behind `tmp` in the error | `copy.go:39-47` | `NoSilentLeak` |
 | Releasing the lock when the connection drops | Server behavior | `MutexOK` |
-| The catalog check just before the write that restores the base, which runs without holding the lock | `base.go:282`, `mutation.go:145` | `MarkerAgrees` |
+| The catalog check just before the write that restores the base, which runs without holding the lock | `base.go:296`, `mutation.go:145` | `MarkerAgrees` |
 | Deleting a copy that was not used (configurations with crashes) | `mutation.go:158-176` | `NoSilentLeak` |
-| The first-generation calculation of `base create` and `base adopt` (always set to 1) | `base.go:39-52` | `Fresh` (configuration `external`) |
+| The first-generation calculation of `base create` and `base adopt` (always set to 1) | `base.go:39-61` | `Fresh` (configuration `external`) |
+| The next-generation calculation of `base close` (always the base's generation plus 1) | `base.go:219-223` | `Fresh` (configuration `reentry`) |
 | The check, inside the first lock of `ensure`, of whether the base is open | `ensure.go:89-91` | No violation |
 
 The last row produced no violation. Even with the first check removed, the check inside the second lock discards the same copy. The first check exists to avoid creating a copy that would be discarded, and does not affect safety.
@@ -282,17 +284,29 @@ In the model, with the specification where the generation always starts from 1, 
 
 It was also reproduced on PostgreSQL 18.7. Running `base create`, `pool fill`, `ensure b1`, `DROP DATABASE app`, `base create` with different content, and `ensure b2` in that order, `ensure b2` returned `source: "pool"` and `stale: false`, and its content was the content from before the recreation. `list` showed both branches as `stale: false`.
 
-In the fix, `base create` and `base adopt` start from a generation equal to the maximum generation among the remaining pool copies and branches, plus 1 (`base.go:39-52`). The marker format and the places that compare generations (`ensure.go:184`, `ensure.go:223`) are unchanged. After the fix, the same sequence gives the following result. The recreated base becomes generation 2, `ensure b2` returns the new content with `source: "copy"` and `stale: false`, and `list` shows `b1` as `stale: true`. The pool copies of the previous base are counted as old in `pool status` and become targets of `gc` deletion.
+In the fix, `base create` and `base adopt` start from a generation equal to the maximum generation among the remaining pool copies and branches, plus 1 (`base.go:39-61`). The marker format and the places that compare generations (`ensure.go:184`, `ensure.go:223`) are unchanged. After the fix, the same sequence gives the following result. The recreated base becomes generation 2, `ensure b2` returns the new content with `source: "copy"` and `stale: false`, and `list` shows `b1` as `stale: true`. The pool copies of the previous base are counted as old in `pool status` and become targets of `gc` deletion.
 
 In the model, the configurations `external` and `external-faults` were confirmed not to violate `Fresh`, `FreshCurrent`, and `NoFutureGen`. If the first generation is set back to 1, `external` violates `Fresh`.
 
 When the base is replaced during a copy, the OID comparison already discarded the copy before the fix (`ensure.go:133`, `pool.go:122`). A `tmp` or an unmarked copy does not become a pool copy or a branch unless the process that created it passes this comparison, so they are not included in the first-generation calculation.
 
-This fix does not cover 1 case.
-
-- A base that comes back with its marker still attached. A base that was renamed and put back, or one restored together with its comment, is accepted by `base adopt` without any change (`base.go:154-163`). The generation stays as written in the marker, so it can overlap with the remaining copies. The model's external recreation produces only unmarked databases, so this case is not checked.
-
 A `tmp` made from the previous base can remain with a marker whose generation is greater than or equal to that of the recreated base. This happens when the creating process crashes before discarding the copy through the OID comparison. This `tmp` is never assigned. `gc` also deletes a `tmp` whose generation is the same as or newer than the base 1 hour after creation (`gc.go:58-59`). Previously, only `pool drain` deleted a `tmp` whose generation was greater than the base.
+
+### A base that came back with its marker could share a generation with other copies (fixed)
+
+A marked base can leave and come back outside pgcheckout in 2 ways. It can be renamed away and later renamed back, keeping its marker and OID. Or a dump taken while the base was open can be restored, which creates a new database with the old marker: open, with the generation at the time of the dump. A closed base cannot be dumped, because `pg_dump` cannot connect to it. Both were confirmed on PostgreSQL 18.7.
+
+Before the fix, `base close` always wrote the base's generation plus 1, and only a lower generation counted as stale. A base that returned with an old generation could therefore reach, on a later `base close`, a generation that copies of another base already carried. Those copies were then assigned, or shown, as current.
+
+The fix has 3 rules.
+
+1. `base create`, `base adopt` and `base close` take the maximum over the generations recorded on pool copies, branches, and any base marker for this base that sits on a database with another name (`base.go:39-60`).
+2. `base close` writes that maximum, or the base's own generation if it is greater, plus 1 (`base.go:219-223`).
+3. A copy is current only when its generation equals the base's. Any other generation is stale: it is shown as `stale`, never assigned, and deleted by `gc` if it is a pool copy (`ensure.go:223`, `catalog.go:51`, `gc.go:57`, `pool.go:203-207`).
+
+In the model, the configuration `reentry` was confirmed not to violate `Fresh` and `FreshCurrent`. If `base close` is set back to the base's generation plus 1, `reentry` violates `Fresh`. If a branch whose generation is greater than the base's is treated as current, as it was before, `reentry` violates `FreshCurrent`. Within the bounds of `reentry`, removing the renamed-away base from the maximum in rule 1 produced no violation. That part is covered by the integration test `TestParkedBaseKeepsGenerationsApart`, not by the model.
+
+1 case is outside both the fix and the model. If the base is renamed away and back while a copy that started from it is still running, and another database held the base's name when `CREATE DATABASE` read its template, the copy has the other database's content and still passes the OID comparison. `CREATE DATABASE` names its template, so pgcheckout cannot tell which database the copy read. The model excludes this sequence explicitly in `ExternalUnpark`.
 
 ### `reset` can fail after deleting the branch
 

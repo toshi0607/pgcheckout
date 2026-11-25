@@ -515,6 +515,152 @@ func TestEnsureFailsWhileBaseOpen(t *testing.T) {
 	}
 }
 
+func TestParkedBaseKeepsGenerationsApart(t *testing.T) {
+	f := newFixture(t, func(t *testing.T, f *fixture) {
+		source := connectTestDB(t, f.svc.Config.DatabaseURL(f.source))
+		execTestSQL(t, source, "CREATE TABLE public.items (id integer PRIMARY KEY)")
+		execTestSQL(t, source, "INSERT INTO public.items VALUES (1)")
+		if err := source.Close(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+	})
+	b1 := f.ensure(t, "b1")
+	name := f.svc.Config.Base
+	parked := name + "_parked"
+	execTestSQL(t, f.admin, "ALTER DATABASE "+pg.Identifier(name)+" RENAME TO "+pg.Identifier(parked))
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if _, err := f.admin.Exec(ctx, "DROP DATABASE IF EXISTS "+pg.Identifier(parked)); err != nil {
+			t.Errorf("clean up parked base: %v", err)
+		}
+	})
+	source := connectTestDB(t, f.svc.Config.DatabaseURL(f.source))
+	execTestSQL(t, source, "UPDATE public.items SET id = 2")
+	if err := source.Close(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	recreated, err := f.svc.BaseCreate(t.Context(), name, f.source, false)
+	if err != nil || recreated.Gen != 2 {
+		t.Fatalf("recreate base: %+v, %v", recreated, err)
+	}
+	b2 := f.ensure(t, "b2")
+	f.fill(t, 1)
+
+	execTestSQL(t, f.admin, "DROP DATABASE "+pg.Identifier(name))
+	execTestSQL(t, f.admin, "ALTER DATABASE "+pg.Identifier(parked)+" RENAME TO "+pg.Identifier(name))
+	if got := f.ensure(t, "b1"); got.Source != "existing" || got.Database != b1.Database || got.Stale || got.Gen != 1 {
+		t.Fatalf("ensure b1 after restoring base: source=%q, database=%q, stale=%t, gen=%d", got.Source, got.Database, got.Stale, got.Gen)
+	}
+	if got := f.ensure(t, "b2"); got.Source != "existing" || got.Database != b2.Database || !got.Stale || got.Gen != 2 {
+		t.Fatalf("ensure b2 after restoring base: source=%q, database=%q, stale=%t, gen=%d", got.Source, got.Database, got.Stale, got.Gen)
+	}
+	list, err := f.svc.List(t.Context())
+	if err != nil || len(list.Branches) != 2 {
+		t.Fatalf("list branches after restoring base: %+v, %v", list.Branches, err)
+	}
+	for _, branch := range list.Branches {
+		if branch.Stale != (branch.Branch == "b2") {
+			t.Fatalf("list branch %q after restoring base: stale=%t", branch.Branch, branch.Stale)
+		}
+	}
+	status, err := f.svc.PoolStatus(t.Context())
+	if err != nil || status.Ready != 0 || status.Stale != 1 || len(status.Databases) != 1 || status.Databases[0].Gen != 2 {
+		t.Fatalf("pool after restoring base: %+v, %v", status, err)
+	}
+	pool := status.Databases[0].Name
+	swept, err := f.svc.GC(t.Context(), false)
+	if err != nil || !slices.Equal(swept.Dropped, []string{pool}) || f.exists(t, pool) {
+		t.Fatalf("GC after restoring base: %+v, %v", swept, err)
+	}
+
+	if _, err := f.svc.BaseOpen(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	closed, err := f.svc.BaseClose(t.Context(), false)
+	if err != nil || closed.Gen != 3 {
+		t.Fatalf("close restored base: %+v, %v", closed, err)
+	}
+	for _, old := range []EnsureResult{b1, b2} {
+		if got := f.ensure(t, old.Branch); got.Source != "existing" || got.Database != old.Database || !got.Stale {
+			t.Fatalf("ensure %s after closing base: source=%q, database=%q, stale=%t", old.Branch, got.Source, got.Database, got.Stale)
+		}
+	}
+	b3 := f.ensure(t, "b3")
+	if !b3.Created || b3.Gen != 3 || b3.Stale {
+		t.Fatalf("ensure b3: created=%t, gen=%d, stale=%t", b3.Created, b3.Gen, b3.Stale)
+	}
+	branch := connectTestDB(t, b3.URL)
+	var ids []int32
+	if err := branch.QueryRow(t.Context(), "SELECT array_agg(id ORDER BY id) FROM public.items").Scan(&ids); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(ids, []int32{1}) {
+		t.Fatalf("b3 row IDs = %v, want [1]", ids)
+	}
+}
+
+func TestRestoredBaseMarkerDoesNotReuseGeneration(t *testing.T) {
+	f := newFixture(t, func(t *testing.T, f *fixture) {
+		source := connectTestDB(t, f.svc.Config.DatabaseURL(f.source))
+		execTestSQL(t, source, "CREATE TABLE public.items (id integer PRIMARY KEY)")
+		execTestSQL(t, source, "INSERT INTO public.items VALUES (1)")
+		if err := source.Close(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+	})
+	name := f.svc.Config.Base
+	if _, err := f.svc.BaseOpen(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	var comment string
+	if err := f.admin.QueryRow(t.Context(), "SELECT shobj_description(oid, 'pg_database') FROM pg_database WHERE datname = $1", name).Scan(&comment); err != nil {
+		t.Fatal(err)
+	}
+	closed, err := f.svc.BaseClose(t.Context(), false)
+	if err != nil || closed.Gen != 2 {
+		t.Fatalf("close original base: %+v, %v", closed, err)
+	}
+	b1 := f.ensure(t, "b1")
+	if b1.Gen != 2 {
+		t.Fatalf("b1 generation = %d, want 2", b1.Gen)
+	}
+
+	execTestSQL(t, f.admin, "DROP DATABASE "+pg.Identifier(name))
+	source := connectTestDB(t, f.svc.Config.DatabaseURL(f.source))
+	execTestSQL(t, source, "UPDATE public.items SET id = 2")
+	if err := source.Close(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	execTestSQL(t, f.admin, "CREATE DATABASE "+pg.Identifier(name)+" TEMPLATE "+pg.Identifier(f.source))
+	if err := pg.SetComment(t.Context(), f.admin, name, &comment); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.svc.Ensure(t.Context(), "b2", EnsureOptions{NoRefill: true}); config.ErrorCode(err) != config.BaseOpen {
+		t.Fatalf("ensure b2 against restored open base = %v, want base_open", err)
+	}
+
+	closed, err = f.svc.BaseClose(t.Context(), false)
+	if err != nil || closed.Gen != 3 {
+		t.Fatalf("close restored base: %+v, %v", closed, err)
+	}
+	if got := f.ensure(t, "b1"); got.Source != "existing" || got.Database != b1.Database || !got.Stale {
+		t.Fatalf("ensure b1 after closing base: source=%q, database=%q, stale=%t", got.Source, got.Database, got.Stale)
+	}
+	b2 := f.ensure(t, "b2")
+	if !b2.Created || b2.Gen != 3 || b2.Stale {
+		t.Fatalf("ensure b2: created=%t, gen=%d, stale=%t", b2.Created, b2.Gen, b2.Stale)
+	}
+	branch := connectTestDB(t, b2.URL)
+	var ids []int32
+	if err := branch.QueryRow(t.Context(), "SELECT array_agg(id ORDER BY id) FROM public.items").Scan(&ids); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(ids, []int32{2}) {
+		t.Fatalf("b2 row IDs = %v, want [2]", ids)
+	}
+}
+
 func TestGCDropsExpiredOnly(t *testing.T) {
 	f := newFixture(t, nil)
 	expired := f.ensure(t, "expired")

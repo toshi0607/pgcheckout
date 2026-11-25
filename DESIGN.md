@@ -13,7 +13,7 @@ Products that cannot copy a database inside the server, such as MySQL, are out o
 | Base | The database that copies are made from. It is protected by forbidding connections |
 | Branch | A copy of the base that developers and agents connect to and use |
 | Pool | Databases copied from the base in advance that are not yet assigned to anyone |
-| Generation | An integer that increases by 1 each time the contents of the base change. It records which state of the base a copy was made from |
+| Generation | An integer that increases each time the contents of the base change. It records which state of the base a copy was made from |
 | Maintenance database | The database pgcheckout connects to in order to run management SQL. It is separate from the base |
 | Marker | JSON written in a database comment that shows pgcheckout manages the database |
 
@@ -79,10 +79,10 @@ This guarantees there are no connections, which avoids a copy failing because co
 | `base create <name> --from <existing DB>` | Creates the base by copying an existing database. The original database stays usable |
 | `base adopt <existing DB>` | Makes an existing database the base as is. After that, no one can connect to that database |
 | `base open` | Allows connections to the base. Use it when changing the base, for example with migrations |
-| `base close` | Forbids connections to the base and increases the generation by 1. Discards pools of an older generation |
+| `base close` | Forbids connections to the base and moves it to a new generation. Discards pools of other generations |
 
 Only `base close` increases the generation.
-`base create` and `base adopt` start from the maximum generation among the remaining pools and branches with the same base name plus 1. If none remain, they start from 1. Even if the base is deleted outside pgcheckout and created again, copies of the previous base are treated as an older generation.
+`base create` and `base adopt` start from the maximum generation among the remaining pools and branches with the same base name, and any base that was renamed away, plus 1. If none remain, they start from 1. `base close` moves the base to the maximum of its own generation and those same generations, plus 1. In the usual case this is the current generation plus 1. A copy is current only when its generation equals the base's. Any other generation, older or newer, is stale. So when the base is deleted outside pgcheckout and created again, or comes back with an old marker after a rename or a restore from a dump, copies of the other base never share its generation.
 While the base is open, `ensure` does not create new copies and returns the `base_open` error. It still returns branches that already exist, even when the base is open.
 When the database that is already the base is open, `base adopt` returns the `base_open` error. Only `base close` closes it.
 Forbidding connections does not cut connections that are already established. So right after forbidding connections, pgcheckout counts connections again. If any remain, it returns the base to the open state and returns `database_in_use`. It increases the generation only after confirming no connections remain.
@@ -97,7 +97,7 @@ When `base adopt` fails, it restores the target database's comment and connectio
 If the branch name is omitted, it uses git's current branch name.
 
 1. Read the base's marker and take an advisory lock on the maintenance database.
-2. Look for a database with the name determined by the branch name. If it exists and the marker's `branch` matches, return it without changing anything (`created: false`). If its generation is older than the base, add `stale: true`. It does not recreate the database. If a database with the same name has no marker, or its marker points to a different branch, return the `unmanaged_database` error.
+2. Look for a database with the name determined by the branch name. If it exists and the marker's `branch` matches, return it without changing anything (`created: false`). If its generation differs from the base's, add `stale: true`. It does not recreate the database. If a database with the same name has no marker, or its marker points to a different branch, return the `unmanaged_database` error.
 3. If none exists, pick 1 pool whose generation equals the base's, and do the rename and the marker rewrite in 1 transaction (`source: "pool"`).
 4. If the pool is empty, outside the lock copy to a `tmp` name and reapply settings and privileges, retake the lock and redo step 2, then do the rename and the marker rewrite (`source: "copy"`).
 5. After printing the result, if the pool is below the target count, start a refill as a separate process detached from itself. The refill process does not inherit standard input and output.
@@ -120,7 +120,7 @@ Advisory locks are independent for each database you connect to. Everyone who us
 | `drop [branch]` | Deletes the branch. It fails if connections remain, and `--force` cuts them and deletes |
 | `reset [branch]` | Deletes the branch and recreates it |
 | `pool fill` / `pool status` / `pool drain` | Fill, status, and discard of the pool |
-| `gc` | Deletes expired branches and pools of an older generation. Has `--dry-run` |
+| `gc` | Deletes expired branches and pools of other generations. Has `--dry-run` |
 | `doctor` | Reports the server version, privileges, the selected strategy, the base state, and `unmanaged` databases |
 | `base ...` | See above |
 | `hook install` / `hook uninstall` | Installs or removes the git post-checkout hook |

@@ -84,7 +84,7 @@ The file it writes contains a connection string that includes the password. Add 
 ## Update the base
 
 To change the contents of the base, for example with a migration, open the base, make the change, and close it.
-Closing the base increments its generation by 1 and discards the pool built from the old generation.
+Closing the base moves it to a new generation and discards the pool built from other generations.
 
 ```bash
 pgcheckout base open
@@ -94,7 +94,7 @@ pgcheckout base open
 pgcheckout base close
 ```
 
-Existing branches are not recreated. Branches from an old generation are marked `stale: true` in the output of `ensure` and `list`.
+Existing branches are not recreated. Branches whose generation differs from the base are marked `stale: true` in the output of `ensure` and `list`.
 To recreate one, use `pgcheckout reset`.
 
 ## Commands
@@ -107,7 +107,7 @@ To recreate one, use `pgcheckout reset`.
 | `drop [branch]` | Deletes the branch. If connections remain, `--force` is required |
 | `reset [branch]` | Deletes the branch and recreates it |
 | `pool fill` / `pool status` / `pool drain` | Refills, reports the status of, and discards the pool |
-| `gc` | Deletes expired branches and pools from old generations |
+| `gc` | Deletes expired branches and pools from other generations |
 | `doctor` | Reports the state of the server, privileges, and base |
 | `base create` / `base adopt` / `base open` / `base close` | Creates and updates the base |
 | `hook install` / `hook uninstall` | The post-checkout hook |

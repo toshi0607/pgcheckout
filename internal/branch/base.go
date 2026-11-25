@@ -36,7 +36,7 @@ func baseInfo(db pg.Database) BaseInfo {
 	return BaseInfo{Name: db.Name, Gen: db.Marker.Gen, Open: db.Marker.IsOpen(), AllowConnections: db.AllowConnections}
 }
 
-func (s *session) firstGen(ctx context.Context) (int, error) {
+func (s *session) highestStampedGen(ctx context.Context) (int, error) {
 	dbs, err := s.managedDatabases(ctx)
 	if err != nil {
 		return 0, err
@@ -47,7 +47,16 @@ func (s *session) firstGen(ctx context.Context) (int, error) {
 			highest = max(highest, db.Marker.Gen)
 		}
 	}
-	return highest + 1, nil
+	dbs, err = pg.Databases(ctx, s.Conn)
+	if err != nil {
+		return 0, err
+	}
+	for _, db := range dbs {
+		if db.Name != s.Base && db.Marker.Kind == marker.Base && db.Marker.ValidFor(s.Base) {
+			highest = max(highest, db.Marker.Gen)
+		}
+	}
+	return highest, nil
 }
 
 func (svc Service) BaseCreate(ctx context.Context, name, from string, terminate bool) (BaseResult, error) {
@@ -81,10 +90,11 @@ func (svc Service) BaseCreate(ctx context.Context, name, from string, terminate 
 			if err != nil {
 				return err
 			}
-			gen, err := s.firstGen(ctx)
+			highest, err := s.highestStampedGen(ctx)
 			if err != nil {
 				return err
 			}
+			gen := highest + 1
 			if terminate {
 				if err := pg.Terminate(ctx, s.Conn, from); err != nil {
 					return databaseError(err, "")
@@ -161,11 +171,11 @@ func (svc Service) BaseAdopt(ctx context.Context, name string, terminate bool) (
 				result.BaseInfo = baseInfo(db)
 				return nil
 			}
-			gen, err := s.firstGen(ctx)
+			highest, err := s.highestStampedGen(ctx)
 			if err != nil {
 				return err
 			}
-			m = marker.New(marker.Base, name, gen)
+			m = marker.New(marker.Base, name, highest+1)
 			if err := s.closeBase(ctx, db, m, terminate, true); err != nil {
 				return err
 			}
@@ -206,10 +216,14 @@ func (svc Service) changeBase(ctx context.Context, open, terminate bool) (BaseRe
 					return err
 				}
 			} else {
+				highest, err := s.highestStampedGen(ctx)
+				if err != nil {
+					return err
+				}
+				m.Gen = max(m.Gen, highest) + 1
 				if err := s.closeBase(ctx, db, m, terminate, false); err != nil {
 					return err
 				}
-				m.Gen++
 			}
 			result.BaseInfo = BaseInfo{Name: db.Name, Gen: m.Gen, Open: open, AllowConnections: open}
 			result.Changed = true
@@ -236,23 +250,25 @@ func (s *session) closeBase(ctx context.Context, db pg.Database, m marker.Marker
 		return errors.Join(err, terminateErr)
 	}
 	// Keep copies blocked until the session check and any generation bump are complete.
-	m.Open = new(true)
+	closing := db
+	if adopt {
+		closing.Marker = m
+	}
+	closing.Marker.Open = new(true)
+	closing.AllowConnections = false
 	transition, cancel := cleanupContext(ctx)
-	err := s.writeBase(transition, db, m, new(false), adopt)
+	err := s.writeBase(transition, db, closing.Marker, new(false), adopt)
 	cancel()
 	if err != nil {
 		return errors.Join(err, terminateErr)
 	}
-	closing := db
-	closing.Marker = m
-	closing.AllowConnections = false
-	if err := s.finishBaseClose(ctx, closing, db, terminate, adopt); err != nil {
+	if err := s.finishBaseClose(ctx, closing, db, m.Gen, terminate, adopt); err != nil {
 		return errors.Join(err, terminateErr)
 	}
 	return nil
 }
 
-func (s *session) finishBaseClose(ctx context.Context, closing, original pg.Database, terminate, adopt bool) error {
+func (s *session) finishBaseClose(ctx context.Context, closing, original pg.Database, gen int, terminate, adopt bool) error {
 	err := ctx.Err()
 	if err == nil {
 		cleanup, cancel := cleanupContext(ctx)
@@ -265,9 +281,7 @@ func (s *session) finishBaseClose(ctx context.Context, closing, original pg.Data
 	if err == nil {
 		m := closing.Marker
 		m.Open = new(false)
-		if !adopt {
-			m.Gen++
-		}
+		m.Gen = gen
 		cleanup, cancel := cleanupContext(ctx)
 		err = s.writeBase(cleanup, closing, m, nil, false)
 		cancel()
