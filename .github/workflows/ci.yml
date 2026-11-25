@@ -1,0 +1,95 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: build / vet / test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v7.1.0
+        with:
+          go-version-file: go.mod
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "These files are not formatted with gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go mod tidy -diff
+        run: go mod tidy -diff
+
+      - run: go build ./...
+
+      - run: go vet ./...
+
+      - run: go vet -tags integration ./...
+
+      - name: go test
+        run: go test -race -count=1 ./...
+
+  integration:
+    name: integration (${{ matrix.server.name }})
+    runs-on: ubuntu-latest
+    # AlloyDB Omni is reported but does not block a merge until its container
+    # has proved stable on hosted runners.
+    continue-on-error: ${{ matrix.server.experimental }}
+    strategy:
+      fail-fast: false
+      matrix:
+        server:
+          - name: PostgreSQL 18
+            image: postgres:18
+            experimental: false
+          - name: AlloyDB Omni 17
+            image: google/alloydbomni:17
+            experimental: true
+    services:
+      db:
+        image: ${{ matrix.server.image }}
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 24
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v7.1.0
+        with:
+          go-version-file: go.mod
+
+      # The tests run as a role that has CREATEDB and CREATEROLE but is not a
+      # superuser, and that owns its maintenance database.
+      - name: Create the test role
+        env:
+          DB_CONTAINER: ${{ job.services.db.id }}
+        run: |
+          docker exec "$DB_CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d postgres \
+            -c "CREATE ROLE pgcheckout_ci LOGIN CREATEDB CREATEROLE PASSWORD 'pgcheckout_ci'" \
+            -c "CREATE DATABASE pgcheckout_ci OWNER pgcheckout_ci"
+
+      - name: go test -tags integration
+        env:
+          PGCHECKOUT_TEST_ADMIN_URL: postgres://pgcheckout_ci:pgcheckout_ci@127.0.0.1:5432/pgcheckout_ci
+        run: go test -race -count=1 -tags integration ./...
