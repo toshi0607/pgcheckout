@@ -1,298 +1,300 @@
-# pgcheckout の状態モデル
+# The pgcheckout state model
 
-pgcheckout のコードには、状態の型も遷移表も無い。状態は、PostgreSQL のカタログ（データベースの名前、コメント、接続の可否）と、関数の中の手順の位置に分かれて存在する。
-この文書は、コードから読み取った状態と遷移を表にまとめ直したものである。同じ内容を TLA+ で書いた仕様が [pgcheckout.tla](pgcheckout.tla) にあり、検証の結果は末尾に記録する。
+English | [日本語](STATE_MODEL.ja.md)
 
-コードは変更していない。行番号は、この文書を書いた時点のものである。
+The pgcheckout code has no state type and no transition table. State lives in two places: the PostgreSQL catalog (database names, comments, whether connections are allowed) and the position within a function's sequence of steps.
+This document restates the states and transitions read from the code as tables. A specification of the same content written in TLA+ is in [pgcheckout.tla](pgcheckout.tla), and the verification results are recorded at the end.
 
-## 状態を持つもの
+The code is unchanged. Line numbers are those at the time of writing.
 
-状態を持つものは 9 つある。TLA+ の仕様に含めたのは、同時に動く複数のプロセスが互いの途中の状態を観測しうる 1〜6 である。7〜9 は、1 つのプロセスの中で完結するか、ファイルの原子的な置き換えで決まるので、表にとどめた。
+## Things that hold state
 
-| 番号 | 状態を持つもの | 状態の置き場所 | TLA+ |
+There are 9 things that hold state. The TLA+ specification includes 1 to 6, whose intermediate states can be observed by multiple concurrently running processes. 7 to 9 are limited to the tables, because they are contained within a single process or are decided by atomic file replacement.
+
+| No. | What holds state | Where the state is kept | TLA+ |
 |---|---|---|---|
-| 1 | ベース | カタログ（名前、目印、接続の可否） | `base` |
-| 2 | 複製（`tmp` とプール） | カタログ（名前、目印） | `copies` |
-| 3 | ブランチ | カタログ（名前、目印） | `branchDb` |
-| 4 | 操作の手順 | 関数の中の位置 | `pc` |
-| 5 | 接続とコンテキスト | プロセスのメモリ | `conn`、`canc` |
-| 6 | アドバイザリロック | サーバーのセッション | `claim`、`fillLock` |
-| 7 | フックのファイル | `.git/hooks/post-checkout` | 含めない |
-| 8 | 接続先のファイル | `--env-file` のパス | 含めない |
-| 9 | MCP サーバーと補充のプロセス | プロセスのメモリ | 含めない |
+| 1 | Base | Catalog (name, marker, whether connections are allowed) | `base` |
+| 2 | Copies (`tmp` and pool) | Catalog (name, marker) | `copies` |
+| 3 | Branch | Catalog (name, marker) | `branchDb` |
+| 4 | Operation steps | Position within a function | `pc` |
+| 5 | Connection and context | Process memory | `conn`, `canc` |
+| 6 | Advisory locks | Server session | `claim`, `fillLock` |
+| 7 | Hook file | `.git/hooks/post-checkout` | Not included |
+| 8 | Connection target file | The `--env-file` path | Not included |
+| 9 | MCP server and refill process | Process memory | Not included |
 
-## 1. ベース
+## 1. Base
 
-ベースの状態は、名前のデータベースが在るか、目印が在るか、目印の `open`、`datallowconn` の 4 つで決まる。世代は目印の `gen` である。
+The state of the base is decided by four things: whether the database with the base name exists, whether a marker exists, the marker's `open`, and `datallowconn`. The generation is the marker's `gen`.
 
-| 状態 | 目印 | `open` | 接続 | 複製元にできるか |
+| State | Marker | `open` | Connections | Can be a copy source |
 |---|---|---|---|---|
-| 無し | — | — | — | できない |
-| 目印無し | 無し | — | 任意 | できない |
-| 閉 | 在り | false | 禁止 | できる |
-| 開 | 在り | true | 許可 | できない |
-| 閉じる途中 | 在り | true | 禁止 | できない |
+| absent | None | — | — | No |
+| unmarked | None | — | Any | No |
+| closed | Present | false | Blocked | Yes |
+| open | Present | true | Allowed | No |
+| closing | Present | true | Blocked | No |
 
-複製元にできるかは `baseIsOpen` が決める（`internal/branch/service.go:179`）。`open` が true か接続が許可されていれば、開いているものとして扱う。目印が false で接続が許可された組み合わせも「開」として扱われるが、pgcheckout の操作ではこの組み合わせに到達しない。
+`baseIsOpen` decides whether the base can be a copy source (`internal/branch/service.go:179`). If `open` is true or connections are allowed, the base is treated as open. A combination where the marker is false and connections are allowed is also treated as "open", but no pgcheckout operation reaches this combination.
 
-| 遷移 | 起こす操作 | 条件 | コード |
+| Transition | Operation that causes it | Condition | Code |
 |---|---|---|---|
-| 無し → 閉（開始の世代） | `base create` | `tmp` への複製、接続の禁止、接続が無いことの確認を終えて、名前を付け替える | `base.go:93-125` |
-| 目印無し → 閉じる途中（開始の世代） | `base adopt` | 目印が無い | `base.go:164-169`、`base.go:239-241` |
-| 開 → 閉じる途中 | `base close` | 目印が在り、閉でない | `base.go:209`、`base.go:239-241` |
-| 閉じる途中 → 閉 | `base close`、`base adopt` | 接続が 0、取り消されていない、カタログが書いた時点と一致する。`base close` は世代を 1 増やす | `base.go:262-273` |
-| 閉じる途中 → 開 | `base close` の失敗 | 接続が残る、取り消し、接続の喪失 | `base.go:278-288` |
-| 閉じる途中 → 目印無し | `base adopt` の失敗 | 同上。コメントと接続の可否を元に戻す | `base.go:281-285` |
-| 閉 → 開、閉じる途中 → 開 | `base open` | 目印が在る | `base.go:203-207` |
+| absent → closed (first generation) | `base create` | Finish copying to `tmp`, blocking connections, and confirming that no connections exist, then rename | `base.go:93-125` |
+| unmarked → closing (first generation) | `base adopt` | No marker exists | `base.go:164-169`, `base.go:239-241` |
+| open → closing | `base close` | A marker exists and the base is not closed | `base.go:209`, `base.go:239-241` |
+| closing → closed | `base close`, `base adopt` | Zero connections, not canceled, and the catalog matches what was written. `base close` increments the generation by 1 | `base.go:262-273` |
+| closing → open | Failure of `base close` | Connections remain, cancellation, or loss of the connection | `base.go:278-288` |
+| closing → unmarked | Failure of `base adopt` | Same as above. The comment and whether connections are allowed are restored | `base.go:281-285` |
+| closed → open, closing → open | `base open` | A marker exists | `base.go:203-207` |
 
-開始の世代は、同じベース名のプールとブランチに残っている世代の最大値に 1 を足した値である。残っていなければ 1 になる（`firstGen`、`base.go:39-52`）。ベースを pgcheckout の外で消して作り直しても、前のベースの複製と世代が重ならないようにするためである。
+The first generation is the maximum generation remaining among the pools and branches with the same base name, plus 1. If none remain, it is 1 (`firstGen`, `base.go:39-52`). This prevents generations from overlapping with copies of a previous base when the base is dropped outside pgcheckout and created again.
 
-「閉じる途中」は、接続を禁止してから接続を数え終えるまでの状態である。接続を禁止しても既存の接続は切れないので、禁止と世代の更新を 1 回の書き込みにはできない。この状態のあいだも `open` は true なので、複製は始まらない。
+"closing" is the state between blocking connections and finishing counting connections. Blocking connections does not disconnect existing connections, so blocking and updating the generation cannot be a single write. During this state `open` is still true, so no copy starts.
 
-「閉じる途中」で止まるのは、元に戻す書き込みも失敗したときと、プロセスが異常終了したときである。前者はエラーに `could not restore base database` を含める（`base.go:289-302`）。どちらの場合も `base open` か `base close` をもう一度実行すれば抜けられる。
+The base stays in "closing" in two cases: when the write that restores it also fails, and when the process crashes. In the former case the error contains `could not restore base database` (`base.go:289-302`). In either case, running `base open` or `base close` again leaves the state.
 
-## 2. 複製（`tmp` とプール）
+## 2. Copies (`tmp` and pool)
 
-複製は `CREATE DATABASE ... TEMPLATE` で作られ、目印の `kind` を書き換えながら名前を変えていく。
+A copy is created with `CREATE DATABASE ... TEMPLATE`, and its name changes as the marker's `kind` is rewritten.
 
-| 遷移 | 起こす操作 | 条件 | コード |
+| Transition | Operation that causes it | Condition | Code |
 |---|---|---|---|
-| 無し → 目印無し | `ensure`、`pool fill`、`base create` | 複製元に接続が無い | `copy.go:31`、`pg/strategy.go:43-58` |
-| 目印無し → `tmp` | 同じ操作 | 目印の書き込みは 3 回まで試す | `copy.go:52`、`copy.go:75-99` |
-| 目印無し → `tmp`（取り残し） | 同じ操作 | クライアントが `CREATE` を諦めたあと、別の接続で見つけて目印を付ける。削除はしない | `copy.go:35-48`、`copy.go:101-136` |
-| `tmp` → ブランチ | `ensure`、`reset` | ロックの中で、ベースの OID と世代が複製の開始時と同じ、ベースが閉、ブランチがまだ無い | `ensure.go:117-156` |
-| `tmp` → プール | `pool fill` | ロックの中で、ベースの OID と世代が同じ、ベースが閉 | `pool.go:117-143` |
-| `tmp` → ベース | `base create` | 上のベースの表を参照 | `base.go:119-125` |
-| `tmp` → 無し | 作った操作自身 | 公開できなかった | `mutation.go:158-176` |
-| `tmp` → 無し | `base close`、`gc` | 世代がベースより古い | `gc.go:58-59` |
-| `tmp` → 無し | `gc` | 世代が同じで、作成から 1 時間を超えた | `gc.go:59` |
-| `tmp` → 無し | `pool drain` | 無条件 | `pool.go:183-185` |
-| プール → ブランチ | `ensure`、`reset` | ロックの中で、世代がベースと同じ | `ensure.go:183-205` |
-| プール → 無し | `base close`、`gc` | 世代がベースより古い | `gc.go:56-57` |
-| プール → 無し | `pool drain` | 無条件 | `pool.go:183-185` |
+| absent → unmarked | `ensure`, `pool fill`, `base create` | The copy source has no connections | `copy.go:31`, `pg/strategy.go:43-58` |
+| unmarked → `tmp` | Same operations | The marker write is tried up to 3 times | `copy.go:52`, `copy.go:75-99` |
+| unmarked → `tmp` (left behind) | Same operations | After the client gives up on `CREATE`, another connection finds the copy and marks it. It is not deleted | `copy.go:35-48`, `copy.go:101-136` |
+| `tmp` → branch | `ensure`, `reset` | Inside the lock: the base OID and generation are the same as when the copy started, the base is closed, and the branch does not exist yet | `ensure.go:117-156` |
+| `tmp` → pool | `pool fill` | Inside the lock: the base OID and generation are the same, and the base is closed | `pool.go:117-143` |
+| `tmp` → base | `base create` | See the base table above | `base.go:119-125` |
+| `tmp` → absent | The operation that created it | It could not be published | `mutation.go:158-176` |
+| `tmp` → absent | `base close`, `gc` | The generation is older than the base | `gc.go:58-59` |
+| `tmp` → absent | `gc` | The generation is the same and more than 1 hour has passed since creation | `gc.go:59` |
+| `tmp` → absent | `pool drain` | Unconditional | `pool.go:183-185` |
+| pool → branch | `ensure`, `reset` | Inside the lock: the generation is the same as the base | `ensure.go:183-205` |
+| pool → absent | `base close`, `gc` | The generation is older than the base | `gc.go:56-57` |
+| pool → absent | `pool drain` | Unconditional | `pool.go:183-185` |
 
-名前の変更と目印の書き換えは 1 つのトランザクションに入り、その先頭でカタログをもう一度確かめる（`mutation.go:122-135`）。削除も、直前にカタログを確かめる（`mutation.go:70`）。目印の無いデータベースを消す遷移は無い。
+The rename and the marker rewrite go into one transaction, and the transaction begins by checking the catalog again (`mutation.go:122-135`). A deletion also checks the catalog immediately beforehand (`mutation.go:70`). No transition deletes a database that has no marker.
 
-`tmp` は、作った操作が生きているあいだも、ほかのプロセスの `base close`、`gc`、`pool drain` に消されうる。消された側は、名前を付け替えるときにデータベースが無いことを知り、複製からやり直す（`ensure.go:145-147`、`pool.go:135-136`）。
+A `tmp` can be deleted by `base close`, `gc`, or `pool drain` in another process even while the operation that created it is still alive. The side whose copy was deleted learns at rename time that the database does not exist, and starts over from copying (`ensure.go:145-147`, `pool.go:135-136`).
 
-## 3. ブランチ
+## 3. Branch
 
-| 遷移 | 起こす操作 | 条件 | コード |
+| Transition | Operation that causes it | Condition | Code |
 |---|---|---|---|
-| 無し → 在り | `ensure`、`reset` | プールか `tmp` から名前を付け替える | 上の表 |
-| 在り → 無し | `drop`、`reset` | 目印の `branch` が一致する | `lifecycle.go:99-112` |
-| 在り → 無し | `gc` | `expires_at` を過ぎた | `gc.go:54-55` |
+| absent → present | `ensure`, `reset` | Rename from the pool or from `tmp` | Table above |
+| present → absent | `drop`, `reset` | The marker's `branch` matches | `lifecycle.go:99-112` |
+| present → absent | `gc` | `expires_at` has passed | `gc.go:54-55` |
 
-ブランチの世代と内容を、在るまま書き換える遷移は無い。古い世代のブランチは `stale: true` として報告されるだけである（`ensure.go:223`）。
+No transition rewrites the generation or content of an existing branch. A branch with an old generation is only reported as `stale: true` (`ensure.go:223`).
 
-## 4. 操作の手順
+## 4. Operation steps
 
-複数の文にまたがる操作は、次の位置を順に進む。「ロック」は `claim` のアドバイザリロックを指す。ロックの中の読み取りと書き込みは、ほかのロックの保持者からは 1 つの遷移に見える。
+An operation that spans multiple statements moves through the following positions in order. "Lock" means the advisory lock `claim`. Reads and writes inside the lock look like a single transition to other lock holders.
 
-| 操作 | 位置 | 行うこと | ロック | コード |
+| Operation | Position | What it does | Lock | Code |
 |---|---|---|---|---|
-| `ensure` | `e_claim1` | ブランチを探す。プールから取る | 中 | `ensure.go:75-98` |
-| | `create` | `CREATE DATABASE` | 外 | `copy.go:31` |
-| | `mark` | 目印を書く | 外 | `copy.go:52` |
-| | `e_claim2` | 確かめ直して名前を付け替える | 中 | `ensure.go:117-156` |
-| | `discard` | 使わなかった複製を消す | 外 | `ensure.go:157-164` |
-| `reset` | `r1` | ブランチを消す。続きは `ensure` と同じ | 中 | `lifecycle.go:76-88` |
-| `pool fill` | `f_lock` | `fill` のロックを試す | — | `pool.go:55` |
-| | `f_claim1` | プールを数える | 中 | `pool.go:78-90` |
-| | `create`、`mark` | `ensure` と同じ | 外 | `pool.go:99` |
-| | `f_claim2` | 確かめ直して名前を付け替え、`f_claim1` へ戻る | 中 | `pool.go:117-143` |
-| `base close` | `bc1` | 接続を禁止する | 取る | `base.go:193-209`、`base.go:230-244` |
-| | `bc2` | 接続を数える | 中 | `base.go:306-337` |
-| | `bc3` | 世代を増やして閉じ、古い複製を消す | 放す | `base.go:262-273`、`base.go:216-223` |
-| | `brestore` | 開いた状態へ戻す | 放す | `base.go:278-303` |
-| `base adopt` | `ba1` | 開始の世代を決め、目印を書いて接続を禁止する。続きは `bc2` から | 取る | `base.go:145-169` |
-| `base create` | `bcr1` | 名前が空いていることを確かめ、開始の世代を決める | 取る | `base.go:65-85` |
-| | `create`、`mark` | `ensure` と同じ | 中 | `base.go:93` |
-| | `bcr2` | 接続を禁止して名前を付け替える | 放す | `base.go:101-125` |
-| `drop`、`gc`、`pool drain`、`base open` | 1 つ | 上の各表の遷移 | 中 | — |
+| `ensure` | `e_claim1` | Look for the branch. Take from the pool | Inside | `ensure.go:75-98` |
+| | `create` | `CREATE DATABASE` | Outside | `copy.go:31` |
+| | `mark` | Write the marker | Outside | `copy.go:52` |
+| | `e_claim2` | Check again and rename | Inside | `ensure.go:117-156` |
+| | `discard` | Delete the copy that was not used | Outside | `ensure.go:157-164` |
+| `reset` | `r1` | Delete the branch. The rest is the same as `ensure` | Inside | `lifecycle.go:76-88` |
+| `pool fill` | `f_lock` | Try the `fill` lock | — | `pool.go:55` |
+| | `f_claim1` | Count the pool | Inside | `pool.go:78-90` |
+| | `create`, `mark` | Same as `ensure` | Outside | `pool.go:99` |
+| | `f_claim2` | Check again, rename, and return to `f_claim1` | Inside | `pool.go:117-143` |
+| `base close` | `bc1` | Block connections | Acquire | `base.go:193-209`, `base.go:230-244` |
+| | `bc2` | Count connections | Inside | `base.go:306-337` |
+| | `bc3` | Increment the generation, close, and delete old copies | Release | `base.go:262-273`, `base.go:216-223` |
+| | `brestore` | Return to the open state | Release | `base.go:278-303` |
+| `base adopt` | `ba1` | Decide the first generation, write the marker, and block connections. Continues from `bc2` | Acquire | `base.go:145-169` |
+| `base create` | `bcr1` | Confirm that the name is free and decide the first generation | Acquire | `base.go:65-85` |
+| | `create`, `mark` | Same as `ensure` | Inside | `base.go:93` |
+| | `bcr2` | Block connections and rename | Release | `base.go:101-125` |
+| `drop`, `gc`, `pool drain`, `base open` | One | The transitions in the tables above | Inside | — |
 
-`ensure` と `pool fill` は、複製のあいだロックを放す。そのあいだにベースが開かれ、内容が変わり、閉じられることがある。2 回目のロックの中で OID と世代を比べるのは、その場合の複製を捨てるためである（`ensure.go:133`、`pool.go:122`）。
+`ensure` and `pool fill` release the lock during copying. During that time the base can be opened, changed, and closed. Comparing the OID and generation inside the second lock is what discards the copy in that case (`ensure.go:133`, `pool.go:122`).
 
-`dsn`、`list`、`doctor`、`pool status` はカタログを読むだけで、遷移を起こさない。
+`dsn`, `list`, `doctor`, and `pool status` only read the catalog and cause no transitions.
 
-## 5. 接続とコンテキスト
+## 5. Connection and context
 
-| 状態 | 入り方 | その後の動作 | コード |
+| State | How it is entered | Behavior afterward | Code |
 |---|---|---|---|
-| 接続あり | 操作の開始 | — | `service.go:56` |
-| 取り消し済み | 呼び出し側の取り消し、期限 | 呼び出し側のコンテキストを使う文は失敗する。後始末は 5 秒の期限を持つ別のコンテキストで続ける | `service.go:189-191` |
-| 接続なし | 接続の喪失 | 元の接続を使う文は失敗する。後始末は新しい接続で行う | `service.go:120-135` |
-| 終了 | 完了、異常終了 | 異常終了では後始末をしない | — |
+| connected | Start of the operation | — | `service.go:56` |
+| canceled | Cancellation by the caller, a deadline | Statements that use the caller's context fail. Cleanup continues in a separate context with a 5-second deadline | `service.go:189-191` |
+| disconnected | Loss of the connection | Statements that use the original connection fail. Cleanup runs on a new connection | `service.go:120-135` |
+| finished | Completion, crash | No cleanup after a crash | — |
 
-後始末とは、複製の削除（`discardCopy`）、ベースを元に戻す書き込み、目印の付け直しの 3 つである。取り消しは、状態を書き換える文の直前で明示的に確かめる。名前の付け替えの前（`ensure.go:138`、`ensure.go:188`、`pool.go:128`、`base.go:116`）、接続の禁止の前（`base.go:101`、`base.go:235`）、複製を返す前（`copy.go:69`）、接続を数える前と世代を増やす前（`base.go:256`、`base.go:263`）の 9 か所である。確かめたあとの書き込みは、別のコンテキストを使うので取り消しでは止まらない。
+Cleanup means three things: deleting the copy (`discardCopy`), the write that restores the base, and re-attaching the marker. Cancellation is checked explicitly just before statements that change state. There are 9 such places: before the rename (`ensure.go:138`, `ensure.go:188`, `pool.go:128`, `base.go:116`), before blocking connections (`base.go:101`, `base.go:235`), before returning a copy (`copy.go:69`), and before counting connections and before incrementing the generation (`base.go:256`, `base.go:263`). Writes after the check use a separate context, so cancellation does not stop them.
 
-`CREATE DATABASE` は、クライアントが諦めたあともサーバーで走り続けることがある。別の接続から見て元のバックエンドがまだ動いていれば、複製が後から現れうるので、エラーに名前を含める（`copy.go:106-117`）。
+`CREATE DATABASE` can keep running on the server after the client gives up. If, from another connection, the original backend still appears to be running, the copy can appear later, so the error includes the name (`copy.go:106-117`).
 
-## 6. アドバイザリロック
+## 6. Advisory locks
 
-| ロック | 取り方 | 守るもの | コード |
+| Lock | How it is acquired | What it protects | Code |
 |---|---|---|---|
-| `claim` | 待って取る | ベースの目印、ブランチの名前、プールと `tmp` の削除 | `service.go:221-224` |
-| `fill` | 試して、取れなければ終わる | `pool fill` が同時に 1 つだけ動くこと | `pool.go:55`、`pool.go:68-70` |
+| `claim` | Wait and acquire | The base marker, branch names, and deletion of the pool and `tmp` | `service.go:221-224` |
+| `fill` | Try, and finish if not acquired | That only one `pool fill` runs at a time | `pool.go:55`, `pool.go:68-70` |
 
-どちらもセッション単位のロックで、キーはベースの名前と用途から作る（`service.go:194-195`）。接続が切れると、サーバーがロックを放す。そのため、接続を失ったプロセスの後始末は、ロックを持たずに新しい接続で走る。この後始末がほかのプロセスの途中の状態と重なっても壊れないことは、書き込みの直前にカタログを確かめる処理で保たれる（`mutation.go:24-53`）。
+Both are session-level locks, and the key is built from the base name and the purpose (`service.go:194-195`). When the connection drops, the server releases the lock. For that reason, the cleanup of a process that lost its connection runs on a new connection without holding the lock. That this cleanup does not break anything when it overlaps with another process's intermediate state is ensured by checking the catalog just before the write (`mutation.go:24-53`).
 
-## 時間で起きる遷移
+## Time-based transitions
 
-| 対象 | 条件 | 効果 | コード |
+| Target | Condition | Effect | Code |
 |---|---|---|---|
-| ブランチ | `expires_at` を過ぎる | `gc` の削除の対象になる | `gc.go:55` |
-| `tmp` | 作成から 1 時間を超える | 世代が同じでも `gc` の削除の対象になる | `gc.go:50`、`gc.go:59` |
+| Branch | `expires_at` passes | Becomes a target of `gc` deletion | `gc.go:55` |
+| `tmp` | More than 1 hour has passed since creation | Becomes a target of `gc` deletion even if the generation is the same | `gc.go:50`, `gc.go:59` |
 
-時刻はサーバーの `now()` で読む（`gc.go:46`）。
+Time is read from the server's `now()` (`gc.go:46`).
 
-## 7. フックのファイル
+## 7. Hook file
 
-| 状態 | 見分け方 |
+| State | How to tell |
 |---|---|
-| 無し | ファイルが無い |
-| 管理外 | 2 行目が pgcheckout の見出しでない |
-| 管理下 | 2 行目が pgcheckout の見出しである |
+| absent | The file does not exist |
+| unmanaged | Line 2 is not the pgcheckout heading |
+| managed | Line 2 is the pgcheckout heading |
 
-| 遷移 | 起こす操作 | 条件 | コード |
+| Transition | Operation that causes it | Condition | Code |
 |---|---|---|---|
-| 無し → 管理下 | `hook install` | — | `gitx/hook.go:88` |
-| 管理下 → 管理下 | `hook install` | 内容か権限が違うときだけ書き換える | `gitx/hook.go:72-74` |
-| 管理外 → 管理下（控えを残す） | `hook install --force` | 控えの名前が空いている | `gitx/hook.go:82-87`、`gitx/hook.go:141-162` |
-| 管理下 → 無し | `hook uninstall` | — | `gitx/hook.go:128` |
+| absent → managed | `hook install` | — | `gitx/hook.go:88` |
+| managed → managed | `hook install` | Rewrites only when the content or permissions differ | `gitx/hook.go:72-74` |
+| unmanaged → managed (leave a backup) | `hook install --force` | The backup name is free | `gitx/hook.go:82-87`, `gitx/hook.go:141-162` |
+| managed → absent | `hook uninstall` | — | `gitx/hook.go:128` |
 
-管理外のファイルは、`--force` が無ければ書き換えも削除もしない（`gitx/hook.go:69-71`、`gitx/hook.go:118-120`）。`hook uninstall` は控えを元の名前へ戻さず、控えのパスを報告する。
+An unmanaged file is neither rewritten nor deleted without `--force` (`gitx/hook.go:69-71`, `gitx/hook.go:118-120`). `hook uninstall` does not restore the backup to its original name; it reports the backup's path.
 
-## 8. 接続先のファイル
+## 8. Connection target file
 
-| 遷移 | 条件 | コード |
+| Transition | Condition | Code |
 |---|---|---|
-| 無し → 管理下 | — | `gitx/env.go:90` |
-| 管理下 → 管理下 | 内容が違うときだけ書き換える | `gitx/env.go:86-88` |
-| 管理外 → （変えない） | 1 行目が見出しでなければ `unmanaged_file` を返す | `gitx/env.go:83-85` |
+| absent → managed | — | `gitx/env.go:90` |
+| managed → managed | Rewrites only when the content differs | `gitx/env.go:86-88` |
+| unmanaged → (unchanged) | If line 1 is not the heading, returns `unmanaged_file` | `gitx/env.go:83-85` |
 
-書き込みは、同じディレクトリの一時ファイルに書いてから名前を付け替える（`gitx/file.go:40-58`）。ブランチのデータベースを用意したあとにこの書き込みが失敗すると、データベースは残り、エラーの `hint` がその状態を伝える（`gitx/env.go:36-54`）。
+A write goes to a temporary file in the same directory and is then renamed into place (`gitx/file.go:40-58`). If this write fails after the branch database has been prepared, the database remains and the error's `hint` describes that state (`gitx/env.go:36-54`).
 
-## 9. MCP サーバーと補充のプロセス
+## 9. MCP server and refill process
 
-| 状態 | 入り方 | ツールの呼び出し | コード |
+| State | How it is entered | Tool calls | Code |
 |---|---|---|---|
-| 受け付け中 | 起動 | 実行する | `mcpserver/server.go:36-49` |
-| 終了中 | 標準入力の終端、トランスポートの終了 | 新しい呼び出しは始めない。実行中の呼び出しは取り消して待つ | `mcpserver/server.go:51-54`、`mcpserver/server.go:68-76` |
-| 終了 | 実行中の呼び出しが 0 | — | `mcpserver/server.go:54` |
+| accepting | Startup | Runs them | `mcpserver/server.go:36-49` |
+| shutting down | End of standard input, end of the transport | Does not start new calls. Cancels running calls and waits | `mcpserver/server.go:51-54`, `mcpserver/server.go:68-76` |
+| finished | Zero running calls | — | `mcpserver/server.go:54` |
 
-補充のプロセスは、`ensure` の結果が `RefillNeeded` のときに、切り離した別のプロセスとして起動される（`cli/run.go:213-233`）。起動したあとは、ここまでの表の `pool fill` として振る舞う。MCP サーバーは起動した子プロセスの終了を待って回収する（`cli/run.go:139-152`）。
+The refill process is started as a separate, detached process when the result of `ensure` is `RefillNeeded` (`cli/run.go:213-233`). After it starts, it behaves as `pool fill` in the tables so far. The MCP server waits for the child processes it started to exit and reaps them (`cli/run.go:139-152`).
 
-## 不変条件
+## Invariants
 
-TLA+ の仕様で検査した性質を次に示す。名前は仕様の中の定義の名前である。
+The properties checked in the TLA+ specification are listed below. The names are the names of the definitions in the specification.
 
-| 名前 | 内容 |
+| Name | Meaning |
 |---|---|
-| `MutexOK` | `claim` を持つのは、接続が生きていて、複数の文にまたがる区間にいるプロセスだけである |
-| `BaseProtected` | 閉じたベースには、pgcheckout の外からの接続が無い |
-| `SealedBase` | 閉じたベースの内容は、その世代になったときの内容と同じである |
-| `MarkerAgrees` | 目印が閉を示すベースは、接続も禁止されている |
-| `Fresh` | プールとブランチの内容は、目印の世代になったときのベースの内容と同じである |
-| `FreshCurrent` | 閉じたベースと同じ世代のプールとブランチの内容は、ベースの内容と同じである。ベースを外部で作り直す設定で使う |
-| `NoFutureGen` | プールとブランチの世代は、ベースの世代を超えない |
-| `PoolBound` | 現在の世代のプールは、目標の数を超えない |
-| `UnmarkedTransient` | 障害が無ければ、目印の無い複製が在るのは、作った操作が目印を書く直前だけである |
-| `NoSilentLeak` | すべての操作が終わったときに残っている `tmp` と目印の無い複製は、エラーに名前が出たものか、異常終了したプロセスのものである |
-| `ClosingReported` | すべての操作が終わったときにベースが「閉じる途中」なら、元に戻せなかったことが報告されているか、プロセスが異常終了している |
-| `SealedImmutable` | 一度決まった世代の内容は変わらない。内容が変わったベースは、必ず新しい世代で閉じる |
-| `BaseKept` | pgcheckout はベースを削除しない |
-| `GenMonotonic` | ベースの世代は減らない |
-| `BranchStable` | 在るブランチの世代と内容は書き換わらない |
+| `MutexOK` | Only a process whose connection is alive and which is inside a section that spans multiple statements holds `claim` |
+| `BaseProtected` | A closed base has no connections from outside pgcheckout |
+| `SealedBase` | The content of a closed base is the same as its content when it reached that generation |
+| `MarkerAgrees` | A base whose marker indicates closed also has connections blocked |
+| `Fresh` | The content of pool copies and branches is the same as the content of the base when it reached the marker's generation |
+| `FreshCurrent` | The content of pool copies and branches with the same generation as a closed base is the same as the base's content. Used in the configurations where the base is recreated externally |
+| `NoFutureGen` | The generation of pool copies and branches does not exceed the generation of the base |
+| `PoolBound` | The pool at the current generation does not exceed the target count |
+| `UnmarkedTransient` | Without faults, an unmarked copy exists only just before the operation that created it writes the marker |
+| `NoSilentLeak` | When all operations have finished, any `tmp` and unmarked copy that remain are ones whose names appeared in an error, or ones owned by a crashed process |
+| `ClosingReported` | If the base is "closing" when all operations have finished, either the failure to restore it has been reported or the process has crashed |
+| `SealedImmutable` | Once a generation is decided, its content does not change. A base whose content changed is always closed with a new generation |
+| `BaseKept` | pgcheckout does not delete the base |
+| `GenMonotonic` | The base's generation does not decrease |
+| `BranchStable` | The generation and content of an existing branch are not rewritten |
 
-## モデルが省いたもの
+## What the model omits
 
-- データベースの中身は、1 つの整数（内容の版）で表した。
-- 設定と権限の付け直し（`pg/settings.go`、`pg/acl.go`）は表していない。失敗の多くは警告になるだけだが、PUBLIC からの権限の取り消しに失敗した場合は、複製を捨てて操作が失敗する（`ensure.go:110-113`、`base.go:97-100`、`pool.go:108-115`）。この経路は、目印を書いたあとに失敗して複製を捨てる経路と同じ形なので、別の遷移にはしなかった。
-- ブランチやプールへの接続は表していない。接続が残っていて削除が `database_in_use` になる場合と、強制削除の再試行は含まない。
-- 目印が別のベースを指す、壊れている、名前の規則に合うのに目印が無い、といったデータベースは表していない。これらを変更する遷移はコードに無い。
-- 名前の乱数部分の衝突は表していない。
-- 取り消しと接続の喪失は、文と文のあいだで起きるものとして表した。`CREATE DATABASE` だけは、実行中に起きた場合の結果（作られなかった、作られて目印が付いた、後から現れる）を別々の遷移にした。
-- 時間は「1 時間を超えた」「期限を過ぎた」の真偽だけで表した。
-- 終わることの保証（活性）は検査していない。検査したのは、安全性と、待ち合ったまま進めなくなる状態が無いことである。
+- The contents of a database are represented by a single integer (the content version).
+- Re-applying settings and privileges (`pg/settings.go`, `pg/acl.go`) is not represented. Most failures there become only warnings, but if revoking privileges from PUBLIC fails, the copy is discarded and the operation fails (`ensure.go:110-113`, `base.go:97-100`, `pool.go:108-115`). This path has the same shape as the path that fails after writing the marker and discards the copy, so it is not modeled as a separate transition.
+- Connections to branches and pool copies are not represented. This excludes the case where connections remain and the deletion returns `database_in_use`, and the retry with forced deletion.
+- Databases whose marker points to a different base, whose marker is corrupted, or which match the naming rule but have no marker are not represented. No transition in the code changes them.
+- Collisions in the random part of a name are not represented.
+- Cancellation and connection loss are represented as happening between statements. Only for `CREATE DATABASE`, the outcomes when it happens during execution (not created, created and marked, appears later) are separate transitions.
+- Time is represented only as the truth value of "more than 1 hour has passed" and "the deadline has passed".
+- The guarantee of termination (liveness) is not checked. What is checked is safety, and that there is no state in which processes wait for each other and cannot proceed.
 
-## 検証の結果
+## Verification results
 
-TLC 2.19（tla2tools.jar v1.7.4）で、次の設定の到達できる状態をすべて探索した。実行には [check.sh](check.sh) を使う。
+With TLC 2.19 (tla2tools.jar v1.7.4), all reachable states of the following configurations were explored. Use [check.sh](check.sh) to run it.
 
-| 設定 | プロセス | ブランチ | 操作の回数 | 世代の上限 | 障害 | 到達した状態 | 結果 |
+| Configuration | Processes | Branches | Operation count | Generation limit | Faults | States reached | Result |
 |---|---|---|---|---|---|---|---|
-| `normal` | 3 | 2 | 4 | 3 | 無し | 84,807,375 | 違反なし |
-| `lifecycle` | 3 | 1 | 4 | 2 | 無し | 1,627,984 | 違反なし |
-| `cancel` | 2 | 1 | 3 | 2 | 取り消し 2 回 | 453,303 | 違反なし |
-| `loss` | 2 | 1 | 3 | 2 | 接続の喪失 2 回 | 780,386 | 違反なし |
-| `crash` | 2 | 1 | 3 | 2 | 異常終了 2 回 | 246,091 | 違反なし |
-| `cancel-lifecycle` | 2 | 1 | 3 | 2 | 取り消し 2 回 | 106,136 | 違反なし |
-| `loss-lifecycle` | 2 | 1 | 3 | 2 | 接続の喪失 2 回 | 195,015 | 違反なし |
-| `crash-lifecycle` | 2 | 1 | 3 | 2 | 異常終了 2 回 | 70,724 | 違反なし |
-| `allfaults` | 2 | 1 | 2 | 2 | 3 種を合わせて 2 回 | 146,173 | 違反なし |
-| `union` | 2 | 1 | 3 | 2 | 無し | 106,934 | 違反なし |
-| `union-faults` | 2 | 1 | 3 | 2 | 3 種を合わせて 2 回 | 3,911,951 | 違反なし |
-| `external` | 2 | 1 | 4 | 3 | 無し | 2,522,533 | 違反なし |
-| `external-faults` | 2 | 1 | 4 | 3 | 3 種を合わせて 1 回 | 33,309,473 | 違反なし |
+| `normal` | 3 | 2 | 4 | 3 | None | 84,807,375 | No violation |
+| `lifecycle` | 3 | 1 | 4 | 2 | None | 1,627,984 | No violation |
+| `cancel` | 2 | 1 | 3 | 2 | 2 cancellations | 453,303 | No violation |
+| `loss` | 2 | 1 | 3 | 2 | 2 connection losses | 780,386 | No violation |
+| `crash` | 2 | 1 | 3 | 2 | 2 crashes | 246,091 | No violation |
+| `cancel-lifecycle` | 2 | 1 | 3 | 2 | 2 cancellations | 106,136 | No violation |
+| `loss-lifecycle` | 2 | 1 | 3 | 2 | 2 connection losses | 195,015 | No violation |
+| `crash-lifecycle` | 2 | 1 | 3 | 2 | 2 crashes | 70,724 | No violation |
+| `allfaults` | 2 | 1 | 2 | 2 | 2 in total across the 3 kinds | 146,173 | No violation |
+| `union` | 2 | 1 | 3 | 2 | None | 106,934 | No violation |
+| `union-faults` | 2 | 1 | 3 | 2 | 2 in total across the 3 kinds | 3,911,951 | No violation |
+| `external` | 2 | 1 | 4 | 3 | None | 2,522,533 | No violation |
+| `external-faults` | 2 | 1 | 4 | 3 | 1 in total across the 3 kinds | 33,309,473 | No violation |
 
-`normal` と障害ありの設定は、閉じたベースが在る状態から始め、`ensure`、`reset`、`drop`、`pool fill`、`base open`、`base close`、`gc`、`pool drain` を使う。名前に `lifecycle` が付く設定は、ベースが無い状態と目印の無い状態から始め、`base create` と `base adopt` を加える。`union` と `union-faults` は、3 つの初期状態のすべてから始め、10 種の操作をすべて使う。`external` と `external-faults` は、閉じたベースが在る状態から始め、pgcheckout の外でのベースの削除と作り直し（目印の無いデータベースとして現れる）を合わせて 2 回まで加える。使う操作は `ensure`、`pool fill`、`base open`、`base close`、`base adopt`、`base create` で、検査する性質は `MutexOK`、`BaseProtected`、`MarkerAgrees`、`Fresh`、`FreshCurrent`、`NoFutureGen`、`PoolBound` である。どの設定も、プールの目標は 1、内容の版は 0 か 1（`normal` は 2 まで）である。
+`normal` and the configurations with faults start from a state where a closed base exists, and use `ensure`, `reset`, `drop`, `pool fill`, `base open`, `base close`, `gc`, and `pool drain`. The configurations with `lifecycle` in the name start from the absent and unmarked states, and add `base create` and `base adopt`. `union` and `union-faults` start from all three initial states and use all 10 kinds of operations. `external` and `external-faults` start from a state where a closed base exists, and add up to 2 drops and recreations of the base outside pgcheckout in total (which appear as an unmarked database). The operations used are `ensure`, `pool fill`, `base open`, `base close`, `base adopt`, and `base create`, and the properties checked are `MutexOK`, `BaseProtected`, `MarkerAgrees`, `Fresh`, `FreshCurrent`, `NoFutureGen`, and `PoolBound`. In every configuration, the pool target is 1 and the content version is 0 or 1 (up to 2 for `normal`).
 
-検証できたのは、この上限の中の安全性と、待ち合ったまま進めなくなる状態が無いことである。上限を超える数のプロセスや操作については、何も確かめていない。
+What was verified is safety within these bounds, and that there is no state in which processes wait for each other and cannot proceed. Nothing is established for a number of processes or operations beyond these bounds.
 
-### 検査が空振りでないことの確認
+### Confirming that the checks are not vacuous
 
-仕様の条件を 1 か所ずつ外し、TLC が違反を報告することを確かめた。
+Conditions in the specification were removed one at a time, and TLC was confirmed to report a violation.
 
-| 外した条件 | 対応するコード | 違反した性質 |
+| Removed condition | Corresponding code | Violated property |
 |---|---|---|
-| `ensure` の 2 回目のロックでの OID と世代の比較 | `ensure.go:133` | `Fresh` |
-| `ensure` の 2 回目のロックでの、ベースが開いているかの確認 | `ensure.go:130` | `Fresh` |
-| `pool fill` の 2 回目のロックでの OID と世代の比較 | `pool.go:122` | `Fresh` |
-| `base close` の接続の数え直し | `base.go:259` | `BaseProtected` |
-| `base close` の最後の書き込みの直前のカタログの確認 | `mutation.go:145` | `MarkerAgrees` |
-| `base close` での世代の更新 | `base.go:268-270` | `SealedImmutable` |
-| `fill` のロックの排他 | `pool.go:55` | `PoolBound` |
-| 使わなかった複製の削除 | `mutation.go:158-176` | `NoSilentLeak` |
-| 取り残した `tmp` の名前をエラーに含める処理 | `copy.go:39-47` | `NoSilentLeak` |
-| 接続が切れたときのロックの解放 | サーバーの動作 | `MutexOK` |
-| ロックを持たずに走る、ベースを元に戻す書き込みの直前のカタログの確認 | `base.go:282`、`mutation.go:145` | `MarkerAgrees` |
-| 使わなかった複製の削除（異常終了ありの設定） | `mutation.go:158-176` | `NoSilentLeak` |
-| `base create` と `base adopt` の開始の世代の計算（常に 1 にする） | `base.go:39-52` | `Fresh`（設定 `external`） |
-| `ensure` の 1 回目のロックでの、ベースが開いているかの確認 | `ensure.go:89-91` | 違反なし |
+| The OID and generation comparison inside the second lock of `ensure` | `ensure.go:133` | `Fresh` |
+| The check, inside the second lock of `ensure`, of whether the base is open | `ensure.go:130` | `Fresh` |
+| The OID and generation comparison inside the second lock of `pool fill` | `pool.go:122` | `Fresh` |
+| The recount of connections in `base close` | `base.go:259` | `BaseProtected` |
+| The catalog check just before the final write of `base close` | `mutation.go:145` | `MarkerAgrees` |
+| The generation update in `base close` | `base.go:268-270` | `SealedImmutable` |
+| Mutual exclusion of the `fill` lock | `pool.go:55` | `PoolBound` |
+| Deleting a copy that was not used | `mutation.go:158-176` | `NoSilentLeak` |
+| Including the name of a left-behind `tmp` in the error | `copy.go:39-47` | `NoSilentLeak` |
+| Releasing the lock when the connection drops | Server behavior | `MutexOK` |
+| The catalog check just before the write that restores the base, which runs without holding the lock | `base.go:282`, `mutation.go:145` | `MarkerAgrees` |
+| Deleting a copy that was not used (configurations with crashes) | `mutation.go:158-176` | `NoSilentLeak` |
+| The first-generation calculation of `base create` and `base adopt` (always set to 1) | `base.go:39-52` | `Fresh` (configuration `external`) |
+| The check, inside the first lock of `ensure`, of whether the base is open | `ensure.go:89-91` | No violation |
 
-最後の行は、違反が出なかった。1 回目の確認を外しても、2 回目のロックの中の確認が同じ複製を捨てるからである。1 回目の確認は、捨てることになる複製を作らないためのもので、安全性には関わらない。
+The last row produced no violation. Even with the first check removed, the check inside the second lock discards the same copy. The first check exists to avoid creating a copy that would be discarded, and does not affect safety.
 
-到達できることを確かめた状態は 14 ある。プールからの割り当て、複製からの割り当て、世代が変わったことによるやり直し、接続が残っていて閉じられない場合、`tmp` の取り残し、`base create` の完了、世代 3、元に戻す書き込みの失敗、複製が後から現れる場合、目印を付けられなかった場合、異常終了で残った目印の無い複製、ほかのプロセスがロックを持っているあいだに走る元に戻す書き込み、作り直したベースと同じ世代のブランチ、作り直したベースより古い世代のブランチ、である。
+There are 14 states confirmed to be reachable: allocation from the pool, allocation from a copy, retry because the generation changed, the case where connections remain and the base cannot be closed, a left-behind `tmp`, completion of `base create`, generation 3, failure of the restoring write, the case where a copy appears later, the case where the marker could not be written, an unmarked copy left by a crash, a restoring write that runs while another process holds the lock, a branch with the same generation as the recreated base, and a branch with a generation older than the recreated base.
 
-## 検証で分かったこと
+## What the verification revealed
 
-### ベースを pgcheckout の外で作り直すと、古い内容のプールが新しいものとして割り当てられた（修正済み）
+### Recreating the base outside pgcheckout caused a pool copy with old content to be assigned as new (fixed)
 
-修正の前は、ベースを `DROP DATABASE` で消して `base create` か `base adopt` で作り直すと、世代が 1 に戻った。前のベースから作ったプールとブランチは、目印の世代が 1 のまま残る。目印はベースを名前で指すので、作り直したベースの複製と区別が付かなかった。
+Before the fix, if the base was dropped with `DROP DATABASE` and recreated with `base create` or `base adopt`, the generation returned to 1. Pool copies and branches made from the previous base kept marker generation 1. Because the marker refers to the base by name, they could not be distinguished from copies of the recreated base.
 
-モデルでは、世代が常に 1 から始まる仕様で、次の手順が見つかった。
+In the model, with the specification where the generation always starts from 1, the following sequence was found.
 
-1. `ensure` が世代 1 のブランチを作る。
-2. ベースが外部から削除され、別の内容で作り直される。
-3. `base adopt` が、作り直したベースを世代 1 にする。
-4. ブランチの世代はベースと同じ 1 なのに、内容はベースと違う。
+1. `ensure` creates a branch at generation 1.
+2. The base is dropped externally and recreated with different content.
+3. `base adopt` makes the recreated base generation 1.
+4. The branch's generation is 1, the same as the base, but its content differs from the base.
 
-PostgreSQL 18.7 でも再現した。`base create`、`pool fill`、`ensure b1`、`DROP DATABASE app`、別の内容での `base create`、`ensure b2` の順に実行すると、`ensure b2` は `source: "pool"`、`stale: false` を返し、中身は作り直す前の内容だった。`list` は 2 つのブランチを `stale: false` とした。
+It was also reproduced on PostgreSQL 18.7. Running `base create`, `pool fill`, `ensure b1`, `DROP DATABASE app`, `base create` with different content, and `ensure b2` in that order, `ensure b2` returned `source: "pool"` and `stale: false`, and its content was the content from before the recreation. `list` showed both branches as `stale: false`.
 
-修正では、`base create` と `base adopt` が、残っているプールとブランチの世代の最大値に 1 を足した世代から始める（`base.go:39-52`）。目印の形式と、世代を比べる箇所（`ensure.go:184`、`ensure.go:223`）は変えていない。修正のあと、同じ手順は次の結果になった。作り直したベースは世代 2 になり、`ensure b2` は `source: "copy"`、`stale: false` で新しい内容を返し、`list` は `b1` を `stale: true` とした。前のベースのプールは `pool status` で古いものとして数えられ、`gc` の削除の対象になる。
+In the fix, `base create` and `base adopt` start from a generation equal to the maximum generation among the remaining pool copies and branches, plus 1 (`base.go:39-52`). The marker format and the places that compare generations (`ensure.go:184`, `ensure.go:223`) are unchanged. After the fix, the same sequence gives the following result. The recreated base becomes generation 2, `ensure b2` returns the new content with `source: "copy"` and `stale: false`, and `list` shows `b1` as `stale: true`. The pool copies of the previous base are counted as old in `pool status` and become targets of `gc` deletion.
 
-モデルでは、設定 `external` と `external-faults` が `Fresh`、`FreshCurrent`、`NoFutureGen` に違反しないことを確かめた。開始の世代を 1 に戻すと、`external` は `Fresh` に違反する。
+In the model, the configurations `external` and `external-faults` were confirmed not to violate `Fresh`, `FreshCurrent`, and `NoFutureGen`. If the first generation is set back to 1, `external` violates `Fresh`.
 
-複製の途中でベースが入れ替わった場合は、修正の前から OID の比較が複製を捨てている（`ensure.go:133`、`pool.go:122`）。`tmp` と目印の無い複製は、作ったプロセスがこの比較を通らなければプールにもブランチにもならないので、開始の世代の計算には含めていない。
+When the base is replaced during a copy, the OID comparison already discarded the copy before the fix (`ensure.go:133`, `pool.go:122`). A `tmp` or an unmarked copy does not become a pool copy or a branch unless the process that created it passes this comparison, so they are not included in the first-generation calculation.
 
-この修正が扱わない場合が 2 つある。
+This fix does not cover 2 cases.
 
-- 目印が付いたままのベースが戻ってくる場合。名前を変えて戻したベースや、コメントごと復元したベースは、`base adopt` が何も変えずに受け入れる（`base.go:154-163`）。世代は目印に書かれた値のままなので、残っている複製と重なりうる。モデルの外部からの作り直しは目印の無いデータベースだけを作るので、この場合は検査していない。
-- 前のベースから作った `tmp` が、作り直したベース以上の世代の目印を持って残る場合。作ったプロセスが、OID の比較で複製を捨てる前に異常終了すると起こる。この `tmp` が割り当てられることは無い。世代がベースと同じなら `gc` が 1 時間後に消し、ベースより大きければ `pool drain` でだけ消える（`gc.go:58-59`、`pool.go:184`）。
+- A base that comes back with its marker still attached. A base that was renamed and put back, or one restored together with its comment, is accepted by `base adopt` without any change (`base.go:154-163`). The generation stays as written in the marker, so it can overlap with the remaining copies. The model's external recreation produces only unmarked databases, so this case is not checked.
+- A `tmp` made from the previous base remains with a marker whose generation is greater than or equal to that of the recreated base. This happens when the creating process crashes before discarding the copy through the OID comparison. This `tmp` is never assigned. If its generation is the same as the base, `gc` deletes it after 1 hour, and if it is greater than the base, only `pool drain` deletes it (`gc.go:58-59`, `pool.go:184`).
 
-### `reset` は、ブランチを消したあとで失敗することがある
+### `reset` can fail after deleting the branch
 
-`reset` は、ロックの中でブランチを消してロックを放し、`ensure` と同じ手順で作り直す（`lifecycle.go:76-92`）。そのあいだに `base open` が入ると、作り直しは `base_open` で失敗し、ブランチは無いままになる。取り消しと接続の喪失でも同じ状態になる。
+`reset` deletes the branch inside the lock, releases the lock, and recreates it by the same steps as `ensure` (`lifecycle.go:76-92`). If `base open` comes in during that time, the recreation fails with `base_open`, and the branch stays absent. Cancellation and connection loss lead to the same state.
 
-設定 `expect-reset-atomic` がこの手順を示す。データは失われず、ベースを閉じてから `ensure` を実行すれば元の状態になる。この手順は、コードを読んで確かめた。実機では再現していない。
+The configuration `expect-reset-atomic` shows this sequence. No data is lost, and closing the base and then running `ensure` restores the original state. This sequence was confirmed by reading the code. It has not been reproduced on a real server.

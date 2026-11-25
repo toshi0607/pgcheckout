@@ -1,36 +1,38 @@
 # pgcheckout
 
-pgcheckout は、PostgreSQL 互換のサーバーの中で開発用のデータベースを複製し、git のブランチごとに 1 つずつ割り当てる CLI である。
-複製を先に作っておき、要求が来たら名前を付け替えて渡すので、ブランチ用のデータベースは数十ミリ秒で手に入る。
+English | [日本語](README.ja.md)
 
-## 動作する環境
+pgcheckout is a CLI that copies a development database inside a PostgreSQL-compatible server and assigns one copy to each git branch.
+Copies are made ahead of time and renamed when requested, so a branch database is available in tens of milliseconds.
 
-接続文字列で届く PostgreSQL 互換のサーバーで動く。
-PostgreSQL 18.7 と AlloyDB Omni 17.10 で結合テストを実行している。
-サーバー側に必要な権限は `CREATEDB` だけである。
+## Supported environments
 
-複製の速さは、サーバーのバージョンとデータの置き場所で変わる。
-1 GB のデータベースで計測した値を次に示す（各 1〜4 回の計測）。
+pgcheckout works with any PostgreSQL-compatible server reachable by a connection string.
+Integration tests run against PostgreSQL 18.7 and AlloyDB Omni 17.10.
+The only privilege required on the server is `CREATEDB`.
 
-| 環境 | 複製 | 名前の付け替え |
+Copy speed depends on the server version and where the data is stored.
+The table below shows values measured on a 1 GB database (1–4 measurements each).
+
+| Environment | Copy | Rename |
 |---|---|---|
-| PostgreSQL 18（macOS に直接インストール、APFS） | 43〜106 ミリ秒 | 0.12〜0.22 ミリ秒 |
-| PostgreSQL 18（Docker、XFS のボリューム） | 43〜68 ミリ秒 | 0.54 ミリ秒 |
-| PostgreSQL 18（Docker、既定の ext4） | 3.07 秒 | 未計測 |
-| AlloyDB Omni 17（Docker、493 MB） | 0.95〜1.02 秒 | 0.8〜3.1 ミリ秒 |
+| PostgreSQL 18 (installed directly on macOS, APFS) | 43–106 ms | 0.12–0.22 ms |
+| PostgreSQL 18 (Docker, XFS volume) | 43–68 ms | 0.54 ms |
+| PostgreSQL 18 (Docker, default ext4) | 3.07 s | not measured |
+| AlloyDB Omni 17 (Docker, 493 MB) | 0.95–1.02 s | 0.8–3.1 ms |
 
-複製が遅い環境でも、プールに複製が残っていれば、待ち時間は名前の付け替えと接続の分だけになる。
+Even in an environment where copying is slow, if the pool holds a copy, the wait is only the rename plus the connection.
 
-## 使い始める
+## Getting started
 
-インストールする。バイナリは `$(go env GOPATH)/bin` に置かれるので、このディレクトリを `PATH` に入れておく。
+Install it. The binary is placed in `$(go env GOPATH)/bin`, so add that directory to your `PATH`.
 
 ```bash
 go install ./cmd/pgcheckout
 ```
 
-管理用の接続先とベースの名前を環境変数で渡す。
-管理用の接続先には、複製元でもブランチでもないデータベース（`postgres` など）を指定する。
+Pass the maintenance database URL and the base name through environment variables.
+For the maintenance database URL, specify a database that is neither the copy source nor a branch (such as `postgres`).
 
 ```bash
 export PGCHECKOUT_ADMIN_URL=postgres://dev@127.0.0.1:5432/postgres
@@ -40,15 +42,15 @@ export PGCHECKOUT_ADMIN_URL=postgres://dev@127.0.0.1:5432/postgres
 export PGCHECKOUT_BASE=app
 ```
 
-既存の開発用データベース `app_dev` を複製して、ベース `app` を作る。
-ベースは接続を禁止した状態で保存され、`app_dev` はそのまま使える。
+Copy the existing development database `app_dev` to create the base `app`.
+The base is stored with connections disabled, and `app_dev` remains usable as before.
 
 ```bash
 pgcheckout base create app --from app_dev
 ```
 
-現在の git ブランチ用のデータベースを用意する。
-何度実行しても、同じブランチには同じデータベースが返る。
+Prepare the database for the current git branch.
+No matter how many times you run it, the same branch gets the same database.
 
 ```bash
 pgcheckout ensure
@@ -58,31 +60,31 @@ pgcheckout ensure
 {"branch":"feat/login","database":"app__feat_login_d668f008","url":"postgres://dev@127.0.0.1:5432/app__feat_login_d668f008","created":true,"source":"pool","stale":false,"gen":1,"base_gen":1,"strategy":"file_copy_clone","elapsed_ms":2,"refill_requested":true}
 ```
 
-`refill_requested: true` の場合、pgcheckout は結果を出力したあとにバックグラウンドでプールの補充プロセスを起動する。
-起動に失敗すると標準エラーに `{"warning":{"code":"refill_failed","message":"..."}}` を出力し、終了コードは 0 のままとする。
+When `refill_requested: true`, pgcheckout starts a background pool refill process after it prints the result.
+If the start fails, it writes `{"warning":{"code":"refill_failed","message":"..."}}` to stderr and still exits with code 0.
 
-## git のブランチ切り替えに連動させる
+## Follow git branch switches
 
-post-checkout フックを入れると、ブランチを切り替えるたびに接続先がファイルへ書き出される。
+Installing a post-checkout hook writes the connection URL to a file every time you switch branches.
 
 ```bash
 pgcheckout hook install --env-file .env.pgcheckout
 ```
 
-`.env.pgcheckout` には `DATABASE_URL=...` の 1 行が書かれる。
-フックは、リポジトリの `.git/hooks` に置く。`core.hooksPath` が指す共有のディレクトリには書き込まない。
+`.env.pgcheckout` contains a single line, `DATABASE_URL=...`.
+The hook is placed in the repository's `.git/hooks`. It does not write to a shared directory that `core.hooksPath` points to.
 
-フックが動くには、次の 2 つが要る。どちらが欠けても `git checkout` 自体は成功し、接続先のファイルは書き換わらない。
+Two conditions must hold for the hook to run. If either is missing, `git checkout` itself still succeeds, and the connection file is not rewritten.
 
-- `pgcheckout` が、git を実行する環境の `PATH` に在る。無い場合、フックは何も出力せずに終わる。
-- `PGCHECKOUT_ADMIN_URL` が、git を実行する環境に設定されている。ベースの名前は `.pgcheckout.json` に書いてもよい。設定が無い場合、フックは標準エラーに失敗を出力して終わる。
+- `pgcheckout` is on the `PATH` of the environment that runs git. If it is not, the hook exits without printing anything.
+- `PGCHECKOUT_ADMIN_URL` is set in the environment that runs git. The base name may instead be written in `.pgcheckout.json`. If the setting is missing, the hook prints the failure to stderr and exits.
 
-書き出すファイルには、パスワードを含む接続文字列が入る。`.gitignore` に加えて、コミットしないようにする。
+The file it writes contains a connection string that includes the password. Add it to `.gitignore` and make sure it is not committed.
 
-## ベースを更新する
+## Update the base
 
-マイグレーションなどでベースの内容を変えるときは、ベースを開いて変更し、閉じる。
-閉じるとベースの世代が 1 増え、古い世代から作ったプールが破棄される。
+To change the contents of the base, for example with a migration, open the base, make the change, and close it.
+Closing the base increments its generation by 1 and discards the pool built from the old generation.
 
 ```bash
 pgcheckout base open
@@ -92,32 +94,32 @@ pgcheckout base open
 pgcheckout base close
 ```
 
-既存のブランチは作り直されない。古い世代のブランチには、`ensure` と `list` の出力で `stale: true` が付く。
-作り直すときは `pgcheckout reset` を使う。
+Existing branches are not recreated. Branches from an old generation are marked `stale: true` in the output of `ensure` and `list`.
+To recreate one, use `pgcheckout reset`.
 
-## コマンド
+## Commands
 
-| コマンド | 動作 |
+| Command | Action |
 |---|---|
-| `ensure [ブランチ]` | ブランチ用のデータベースを用意して接続先を返す |
-| `dsn [ブランチ]` | 接続先を返す |
-| `list` | ベース、ブランチ、プールの一覧 |
-| `drop [ブランチ]` | ブランチを削除する。接続が残っていれば `--force` が要る |
-| `reset [ブランチ]` | ブランチを削除して作り直す |
-| `pool fill` / `pool status` / `pool drain` | プールの補充、状態、破棄 |
-| `gc` | 期限切れのブランチと古い世代のプールを削除する |
-| `doctor` | サーバー、権限、ベースの状態を報告する |
-| `base create` / `base adopt` / `base open` / `base close` | ベースの作成と更新 |
-| `hook install` / `hook uninstall` | post-checkout フック |
-| `mcp` | 標準入出力で MCP のサーバーとして動く |
-| `help` | コマンド、フラグ、環境変数の一覧を JSON で返す |
+| `ensure [branch]` | Prepares the branch database and returns its connection URL |
+| `dsn [branch]` | Returns the connection URL |
+| `list` | Lists the base, branches, and pool |
+| `drop [branch]` | Deletes the branch. If connections remain, `--force` is required |
+| `reset [branch]` | Deletes the branch and recreates it |
+| `pool fill` / `pool status` / `pool drain` | Refills, reports the status of, and discards the pool |
+| `gc` | Deletes expired branches and pools from old generations |
+| `doctor` | Reports the state of the server, privileges, and base |
+| `base create` / `base adopt` / `base open` / `base close` | Creates and updates the base |
+| `hook install` / `hook uninstall` | The post-checkout hook |
+| `mcp` | Runs as an MCP server over standard input and output |
+| `help` | Returns the commands, flags, and environment variables as JSON |
 
-ブランチ名を省くと、git の現在のブランチ名を使う。
+If you omit the branch name, pgcheckout uses the current git branch name.
 
-## MCP サーバーとして使う
+## Use as an MCP server
 
-`pgcheckout mcp` は、標準入出力で MCP のサーバーとして動く。
-MCP のクライアントには、コマンドを `pgcheckout`、引数を `mcp` として登録する。接続先とベースの名前は、環境変数で渡す。
+`pgcheckout mcp` runs as an MCP server over standard input and output.
+Register it in an MCP client with the command `pgcheckout` and the argument `mcp`. Pass the connection URL and the base name through environment variables.
 
 ```json
 {
@@ -134,66 +136,66 @@ MCP のクライアントには、コマンドを `pgcheckout`、引数を `mcp`
 }
 ```
 
-ツールは `doctor`、`list`、`pool_status`、`dsn`、`ensure`、`reset`、`drop`、`gc` の 8 つである。
-ベースの操作、`pool fill`、`pool drain`、フックの操作は、ツールにしていない。
+There are eight tools: `doctor`, `list`, `pool_status`, `dsn`, `ensure`, `reset`, `drop`, and `gc`.
+Base operations, `pool fill`, `pool drain`, and hook operations are not exposed as tools.
 
-コマンドとして実行する場合との違いは、次の 3 つである。
+There are three differences from running them as commands.
 
-- 結果の `url` にはパスワードを含めない。ツールの結果は会話の記録に残るためである。パスワードを含む接続先は、`ensure` と `reset` の `env_file` でファイルへ書き出す。
-- `reset` と `drop` には、ブランチ名を必ず渡す。`ensure` と `dsn` はブランチ名を省略でき、その場合はサーバーの作業ディレクトリの現在のブランチを使う。
-- 失敗は、`isError` を立てたツールの結果として返す。本文はコマンドの場合と同じ `{"error":{"code","message","hint"}}` である。
+- The `url` in a result does not include the password, because tool results remain in the conversation record. To write a connection URL that includes the password, use `env_file` of `ensure` and `reset` to write it to a file.
+- `reset` and `drop` always require a branch name. `ensure` and `dsn` can omit it, in which case they use the current branch in the server's working directory.
+- A failure is returned as a tool result with `isError` set. The body is the same `{"error":{"code","message","hint"}}` as for commands.
 
-`initialize` で始める従来の手順と、2026-07-28 版の `server/discover` の手順の両方に応える。
+The server supports both the conventional flow that starts with `initialize` and the 2026-07-28 flow that uses `server/discover`.
 
-## 設定
+## Configuration
 
-| 環境変数 | フラグ | 意味 |
+| Environment variable | Flag | Meaning |
 |---|---|---|
-| `PGCHECKOUT_ADMIN_URL` | `--admin-url` | 管理用データベースへの接続文字列 |
-| `PGCHECKOUT_BASE` | `--base` | ベースの名前 |
-| `PGCHECKOUT_POOL_SIZE` | `--pool-size` | プールの目標数（既定 2、0 で無効） |
-| `PGCHECKOUT_STRATEGY` | `--strategy` | 複製の方式（既定 `auto`） |
+| `PGCHECKOUT_ADMIN_URL` | `--admin-url` | Connection string for the maintenance database |
+| `PGCHECKOUT_BASE` | `--base` | Name of the base |
+| `PGCHECKOUT_POOL_SIZE` | `--pool-size` | Target pool size (default 2, 0 disables) |
+| `PGCHECKOUT_STRATEGY` | `--strategy` | Copy strategy (default `auto`) |
 
-秘密でない値は、リポジトリの `.pgcheckout.json` にも書ける。
+Values that are not secret can also be written in the repository's `.pgcheckout.json`.
 
 ```json
 {"base": "app", "pool_size": 2}
 ```
 
-`DATABASE_URL` は読まない。アプリケーション用の接続先に管理の SQL を実行する事故を避けるためである。
+`DATABASE_URL` is not read. This avoids running maintenance SQL against an application's connection URL by mistake.
 
-## 出力
+## Output
 
-標準出力には JSON のオブジェクトを 1 つだけ書く。
-エラーは標準エラーに `{"error":{"code":"...","message":"...","hint":"..."}}` の形で書き、終了コードを 1（使い方の誤りは 2）にする。
-入力を促す対話はしない。
+Standard output receives exactly one JSON object.
+Errors are written to standard error in the form `{"error":{"code":"...","message":"...","hint":"..."}}`, and the exit code is 1 (2 for a usage error).
+pgcheckout never prompts for input.
 
-## 削除の範囲
+## Scope of deletion
 
-pgcheckout が削除するのは、データベースのコメントに pgcheckout の目印があり、指定したベースに属するブランチ、プール、複製途中のデータベースだけである。
-ベースと管理用データベースは削除しない。
-名前が規則に合っていても目印の無いデータベースは、`list` と `doctor` が `unmanaged` として報告するだけにする。
+pgcheckout deletes only branches, pools, and half-copied databases that carry a pgcheckout marker in the database comment and belong to the specified base.
+It does not delete the base or the maintenance database.
+A database whose name follows the naming rule but has no marker is only reported by `list` and `doctor` as `unmanaged`.
 
-## 制限
+## Limitations
 
-- ブランチは同じサーバーの中の別のデータベースであり、CPU、メモリ、ロール、サーバーのバージョンを共有する。
-- ブランチ同士のマージと差分は扱わない。
-- AlloyDB Omni の Docker イメージは PostgreSQL 17 までなので、複製は容量に比例した時間がかかる。
-- マネージドの AlloyDB では計測していない。
-- 同じベースを使う全員が、同じ管理用データベースを指定する必要がある。排他のロックが管理用データベースごとに独立しているためである。
-- ベースの名前には `__` を含められず、末尾を `_` にもできない。
-- 接続先の文字列にはパスワードが含まれる。出力やファイルの扱いに注意する。
+- A branch is a separate database on the same server, and shares CPU, memory, roles, and the server version.
+- Merging and diffing between branches are not supported.
+- The AlloyDB Omni Docker image only goes up to PostgreSQL 17, so copying takes time proportional to the data size.
+- Managed AlloyDB has not been measured.
+- Everyone who uses the same base must specify the same maintenance database. The exclusive locks are independent for each maintenance database.
+- A base name cannot contain `__` and cannot end with `_`.
+- The connection string contains the password. Handle output and files with care.
 
-## テスト
+## Tests
 
 ```bash
 go test ./...
 ```
 
-結合テストは、`CREATEDB` を持つロールの接続先を渡して実行する。
+Run the integration tests by passing the connection URL of a role that has `CREATEDB`.
 
 ```bash
 PGCHECKOUT_TEST_ADMIN_URL=postgres://dev@127.0.0.1:5432/postgres go test -tags integration ./...
 ```
 
-設計は [DESIGN.md](DESIGN.md) にある。
+The design is in [DESIGN.md](DESIGN.md).
