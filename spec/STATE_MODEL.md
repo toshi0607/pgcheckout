@@ -226,17 +226,17 @@ With TLC 2.19 (tla2tools.jar v1.7.4), all reachable states of the following conf
 
 | Configuration | Processes | Branches | Operation count | Generation limit | Faults | States reached | Result |
 |---|---|---|---|---|---|---|---|
-| `normal` | 3 | 2 | 4 | 3 | None | 84,807,375 | No violation |
+| `normal` | 3 | 2 | 4 | 3 | None | 78,318,795 | No violation |
 | `lifecycle` | 3 | 1 | 4 | 2 | None | 1,627,984 | No violation |
-| `cancel` | 2 | 1 | 3 | 2 | 2 cancellations | 453,303 | No violation |
-| `loss` | 2 | 1 | 3 | 2 | 2 connection losses | 780,386 | No violation |
-| `crash` | 2 | 1 | 3 | 2 | 2 crashes | 246,091 | No violation |
+| `cancel` | 2 | 1 | 3 | 2 | 2 cancellations | 460,329 | No violation |
+| `loss` | 2 | 1 | 3 | 2 | 2 connection losses | 814,404 | No violation |
+| `crash` | 2 | 1 | 3 | 2 | 2 crashes | 256,735 | No violation |
 | `cancel-lifecycle` | 2 | 1 | 3 | 2 | 2 cancellations | 106,136 | No violation |
 | `loss-lifecycle` | 2 | 1 | 3 | 2 | 2 connection losses | 195,015 | No violation |
 | `crash-lifecycle` | 2 | 1 | 3 | 2 | 2 crashes | 70,724 | No violation |
-| `allfaults` | 2 | 1 | 2 | 2 | 2 in total across the 3 kinds | 146,173 | No violation |
-| `union` | 2 | 1 | 3 | 2 | None | 106,934 | No violation |
-| `union-faults` | 2 | 1 | 3 | 2 | 2 in total across the 3 kinds | 3,911,951 | No violation |
+| `allfaults` | 2 | 1 | 2 | 2 | 2 in total across the 3 kinds | 145,896 | No violation |
+| `union` | 2 | 1 | 3 | 2 | None | 106,392 | No violation |
+| `union-faults` | 2 | 1 | 3 | 2 | 2 in total across the 3 kinds | 4,051,893 | No violation |
 | `external` | 2 | 1 | 4 | 3 | None | 2,522,533 | No violation |
 | `external-faults` | 2 | 1 | 4 | 3 | 1 in total across the 3 kinds | 33,309,473 | No violation |
 | `reentry` | 2 | 1 | 4 | 3 | None | 29,139,569 | No violation |
