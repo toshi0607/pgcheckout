@@ -28,7 +28,7 @@ MySQL など、サーバー内でデータベースを複製できない製品�
 | 15〜17 | `STRATEGY=WAL_LOG` | `FILE_COPY` は前後にチェックポイントが入り、AlloyDB Omni 17 では遅い回があった |
 | 14 以下 | 指定なし | `STRATEGY` 句が無い |
 
-`file_copy_method` の設定に失敗したサーバーでは、`FILE_COPY` のまま複製する。
+`file_copy_method` の設定に失敗したサーバーでは、`FILE_COPY` のまま複製する。マネージドの AlloyDB 18.4 がこれに当たり、指定できる値は `copy` だけである。`doctor` は、`clone` を指定できるかをサーバーに問い合わせ、できなければ `file_copy` と報告する。
 方式は `PGCHECKOUT_STRATEGY` で上書きできる。
 
 `CREATE DATABASE ... TEMPLATE` は、次の 3 つを複製しない（PostgreSQL 18.7 で確認した）。
@@ -189,6 +189,7 @@ internal/testpg/   結合テストの後片付け（結合テストのときだ�
 | PostgreSQL 18.7（Docker、XFS、`clone`） | 43〜68 ミリ秒 | 0.54 ミリ秒 |
 | AlloyDB Omni 17.10（Docker、ext4、`WAL_LOG`、493 MB） | 0.95〜1.02 秒 | 0.8〜3.1 ミリ秒 |
 | マネージドの AlloyDB 18.4（8 vCPU、`FILE_COPY`、1,029 MB） | 2.1〜3.4 秒 | 15 ミリ秒 |
+| マネージドの AlloyDB 18.4（8 vCPU、`FILE_COPY`、4,706 MB） | 3.0〜4.6 秒 | 未計測 |
 
 各 1〜4 回の計測で、ばらつきは調べていない。
 

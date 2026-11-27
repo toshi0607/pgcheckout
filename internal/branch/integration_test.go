@@ -1388,3 +1388,37 @@ func TestGCDropsAgedTmpFromNewerGeneration(t *testing.T) {
 		t.Fatalf("gc = %+v, %v; aged exists=%t, recent exists=%t", result, err, f.exists(t, aged), f.exists(t, recent))
 	}
 }
+
+func TestDoctorReportsUsableStrategy(t *testing.T) {
+	f := newFixture(t, nil)
+	f.svc.Config.PoolSize = 0
+	ctx := t.Context()
+	doctor, err := f.svc.Doctor(ctx)
+	if err != nil {
+		t.Fatalf("doctor: %v", err)
+	}
+
+	var version int
+	var cloneAccepted bool
+	if err := f.admin.QueryRow(ctx, `SELECT current_setting('server_version_num')::int,
+		COALESCE((SELECT 'clone' = ANY(enumvals) FROM pg_catalog.pg_settings
+			WHERE name = 'file_copy_method'), false)`).Scan(&version, &cloneAccepted); err != nil {
+		t.Fatalf("read server copy capabilities: %v", err)
+	}
+	want := pg.Default
+	switch {
+	case version >= 180000 && cloneAccepted:
+		want = pg.Clone
+	case version >= 180000:
+		want = pg.FileCopy
+	case version >= 150000:
+		want = pg.WALLog
+	}
+	if doctor.Strategy != want {
+		t.Fatalf("doctor strategy = %q, want %q (server version %d, clone accepted: %t)",
+			doctor.Strategy, want, version, cloneAccepted)
+	}
+	if ensured := f.ensure(t, "doctor-strategy"); ensured.Strategy != doctor.Strategy {
+		t.Fatalf("ensure strategy = %q, doctor reported %q", ensured.Strategy, doctor.Strategy)
+	}
+}

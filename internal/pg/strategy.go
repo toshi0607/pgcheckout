@@ -2,6 +2,9 @@ package pg
 
 import (
 	"context"
+	"errors"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/toshi0607/pgcheckout/internal/config"
 )
@@ -55,4 +58,15 @@ func CreateCopy(ctx context.Context, db DB, name, template, strategy string) (st
 	}
 	err := Exec(ctx, db, "copy database", "CREATE DATABASE "+Identifier(name)+" TEMPLATE "+Identifier(template)+clause)
 	return strategy, err
+}
+
+// CloneAvailable reports whether the server accepts clone as a file_copy_method.
+func CloneAvailable(ctx context.Context, db DB) (bool, error) {
+	var available bool
+	err := db.QueryRow(ctx, `SELECT COALESCE('clone' = ANY(enumvals), false)
+		FROM pg_settings WHERE name = 'file_copy_method'`).Scan(&available)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	return available, err
 }
