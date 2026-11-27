@@ -64,7 +64,7 @@
 | 複製はデータベース単位の設定、権限、コメントを写さない | VERIFIED | PG 18.7 の探り（`pg_db_role_setting`、`datacl`、`shobj_description`） |
 | 名前の変更とコメントの書き換えは 1 つのトランザクションに入る | VERIFIED | PG 18.7 の探り（commit と rollback の両方） |
 | 保護したベースの複製、複製で落ちる 3 項目、名前変更とコメントの原子性は AlloyDB Omni 17 でも同じ | VERIFIED | Omni 17.10 で同じ探りを CREATEDB だけのロールで実行（2026-11-22）。`file_copy_method` は 17 に無く、`unrecognized configuration parameter` になる |
-| マネージドの AlloyDB で `clone` が速い | UNVERIFIED-ACCEPTED（2026-11-22） | 実クラスタは課金が要るので未計測。方式は自動選択で、遅くても動作は変わらない。トシに報告済み |
+| マネージドの AlloyDB で `clone` が速い | VERIFIED（成り立たない、2026-11-28） | 無料トライアルのクラスタ（AlloyDB 18.4、8 vCPU、東京）で計測した。`file_copy_method` に指定できる値は `copy` だけで、`clone` は使えない。1,029 MB の複製は、サーバー側の `CREATE DATABASE` で 2.3〜2.5 秒（`FILE_COPY` と `WAL_LOG` のどちらも）、pgcheckout 経由で 2.1〜3.4 秒。`WAL_LOG` の 1 回目だけ 34.7 秒かかった。名前の変更は 15 ミリ秒。手元からパブリック IP 経由でプールから割り当てると、全体で 0.15〜0.28 秒 |
 | AlloyDB Omni の Docker イメージに PostgreSQL 18 は無い | VERIFIED | Docker Hub のタグ一覧（最新は 17.10、2026-11-22 時点） |
 | 2 つの `ALTER DATABASE ... RENAME` と 2 つの `COMMENT ON DATABASE` は、1 つのトランザクションでまとめてコミットまたはロールバックされる | VERIFIED | PG 18.7 の探り（2026-11-25）。CI の結合テストで AlloyDB Omni 17.10 でも同じ |
 | 接続が在るデータベースの名前変更は、約 5 秒待ってから `55006` で失敗する。別ロールの接続は `42501` で切れない | VERIFIED | PG 18.7 の探り（2026-11-25、5.1 秒） |
@@ -281,3 +281,10 @@ d1〜d3 の修正（2026-11-23）:
   - 完了条件: 複製の失敗、入れ替えの失敗、古いデータベースの削除の失敗のテストが通る。TLC の性質 `BranchKept` が全設定で成り立つ
   - 証跡: `TestResetKeepsBranchWhenCopyFails`、`TestResetRollsBackFailedSwap`、`TestResetWarnsWhenOldDatabaseCannotBeDropped` は、修正を外すと落ちる。`reset` のテストは `-race` で 3 回繰り返して通った。`reset` を「先に消す」形に戻すと、`union` は `BranchKept` に違反する
   - レビュー（`reviewer`、2026-11-25）: 致命的と重大の指摘は無し。中程度 4 件のうち、古いデータベースの削除の期限とロックの外への移動、警告の文言を直した。切断の競合の再試行も直した。テストが扱わない経路（強制の再試行、2 つのロックの間でベースが開く場合、取り消し）は、モデルの検査に頼っている
+
+### マネージドの AlloyDB での計測（2026-11-28）
+
+- [x] 無料トライアルのクラスタで、複製の速さと結合テストを確かめる
+  - 環境: プロジェクト `poc-toshi0607`、クラスタ `pgcheckout-trial`（東京、PostgreSQL 18、トライアルは 2026-12-27 まで）。`postgres` ロールはスーパーユーザーではなく、`CREATEDB` と `CREATEROLE` を持つ
+  - 結合テスト: `internal/branch` の 51 件のうち 41 件が通った。落ちた 10 件は、すべて障害を注入するプロキシを使うテストである。プロキシが平文で接続するので、SSL を必須とするサーバーに拒否された。製品の不具合ではない。`internal/mcpserver` は通った。取り残したデータベースは無い
+  - 見つけたこと: `doctor` は、サーバーのバージョンだけから `file_copy_clone` と報告する。実際の複製は `file_copy` に切り替わり、結果にもそう出る。`doctor` の報告だけが実態と違う。直していない

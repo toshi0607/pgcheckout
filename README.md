@@ -20,6 +20,7 @@ The table below shows values measured on a 1 GB database (1–4 measurements eac
 | PostgreSQL 18 (Docker, XFS volume) | 43–68 ms | 0.54 ms |
 | PostgreSQL 18 (Docker, default ext4) | 3.07 s | not measured |
 | AlloyDB Omni 17 (Docker, 493 MB) | 0.95–1.02 s | 0.8–3.1 ms |
+| Managed AlloyDB 18.4 (8 vCPU, 1,029 MB) | 2.1–3.4 s | 15 ms |
 
 Even in an environment where copying is slow, if the pool holds a copy, the wait is only the rename plus the connection.
 
@@ -181,7 +182,8 @@ A database whose name follows the naming rule but has no marker is only reported
 - A branch is a separate database on the same server, and shares CPU, memory, roles, and the server version.
 - Merging and diffing between branches are not supported.
 - The AlloyDB Omni Docker image only goes up to PostgreSQL 17, so copying takes time proportional to the data size.
-- Managed AlloyDB has not been measured.
+- On managed AlloyDB 18.4, `file_copy_method` accepts only `copy`, so copying takes time proportional to the data size. `doctor` reports `file_copy_clone` from the server version alone; the strategy that was actually used is in the result of each copy.
+- On managed AlloyDB, the integration tests that do not inject faults pass. The fault-injection tests go through a plaintext proxy and cannot run against a server that requires SSL.
 - Everyone who uses the same base must specify the same maintenance database. The exclusive locks are independent for each maintenance database.
 - A base name cannot contain `__` and cannot end with `_`.
 - The connection string contains the password. Handle output and files with care.

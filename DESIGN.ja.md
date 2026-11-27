@@ -188,6 +188,7 @@ internal/testpg/   結合テストの後片付け（結合テストのときだ�
 | PostgreSQL 18.7（Docker、ext4、`clone`） | 3.07 秒 | 未計測 |
 | PostgreSQL 18.7（Docker、XFS、`clone`） | 43〜68 ミリ秒 | 0.54 ミリ秒 |
 | AlloyDB Omni 17.10（Docker、ext4、`WAL_LOG`、493 MB） | 0.95〜1.02 秒 | 0.8〜3.1 ミリ秒 |
+| マネージドの AlloyDB 18.4（8 vCPU、`FILE_COPY`、1,029 MB） | 2.1〜3.4 秒 | 15 ミリ秒 |
 
 各 1〜4 回の計測で、ばらつきは調べていない。
 
