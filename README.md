@@ -65,6 +65,8 @@ pgcheckout ensure
 When `refill_requested: true`, pgcheckout starts a background pool refill process after it prints the result.
 If the start fails, it writes `{"warning":{"code":"refill_failed","message":"..."}}` to stderr and still exits with code 0.
 
+To try the whole workflow on a throwaway server first, run the walkthrough in [examples/todo](examples/todo/README.md).
+
 ## Follow git branch switches
 
 Installing a post-checkout hook writes the connection URL to a file every time you switch branches.

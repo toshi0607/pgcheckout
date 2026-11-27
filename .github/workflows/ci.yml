@@ -93,3 +93,8 @@ jobs:
         env:
           PGCHECKOUT_TEST_ADMIN_URL: postgres://pgcheckout_ci:pgcheckout_ci@127.0.0.1:5432/pgcheckout_ci
         run: go test -race -count=1 -tags integration ./...
+
+      - name: Walk through the todo example
+        env:
+          PGCHECKOUT_ADMIN_URL: postgres://pgcheckout_ci:pgcheckout_ci@127.0.0.1:5432/pgcheckout_ci
+        run: examples/todo/demo.sh

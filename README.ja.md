@@ -65,6 +65,8 @@ pgcheckout ensure
 `refill_requested: true` の場合、pgcheckout は結果を出力したあとにバックグラウンドでプールの補充プロセスを起動する。
 起動に失敗すると標準エラーに `{"warning":{"code":"refill_failed","message":"..."}}` を出力し、終了コードは 0 のままとする。
 
+使い捨てのサーバーで先に全体の流れを試すには、[examples/todo](examples/todo/README.ja.md) の手順を実行する。
+
 ## git のブランチ切り替えに連動させる
 
 post-checkout フックを入れると、ブランチを切り替えるたびに接続先がファイルへ書き出される。
