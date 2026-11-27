@@ -188,6 +188,7 @@ Dependencies are limited to `github.com/jackc/pgx/v5` and the official MCP Go SD
 | PostgreSQL 18.7 (Docker, ext4, `clone`) | 3.07 s | not measured |
 | PostgreSQL 18.7 (Docker, XFS, `clone`) | 43-68 ms | 0.54 ms |
 | AlloyDB Omni 17.10 (Docker, ext4, `WAL_LOG`, 493 MB) | 0.95-1.02 s | 0.8-3.1 ms |
+| Managed AlloyDB 18.4 (8 vCPU, `FILE_COPY`, 1,029 MB) | 2.1-3.4 s | 15 ms |
 
 Each is 1 to 4 measurements, and the variance was not examined.
 
