@@ -127,6 +127,12 @@ func (svc Service) Doctor(ctx context.Context) (DoctorResult, error) {
 			result.Problems = append(result.Problems, *config.NewError(config.UnmanagedDatabase,
 				"reserved database names exist without a matching pgcheckout marker", "Check the unmanaged database list."))
 		}
+		// Probe last so an error cannot interrupt the other diagnostics.
+		if result.Strategy == pg.Clone {
+			if available, err := pg.CloneAvailable(ctx, s.Conn); err == nil && !available {
+				result.Strategy = pg.FileCopy
+			}
+		}
 		return result, nil
 	})
 }

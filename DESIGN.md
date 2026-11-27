@@ -28,7 +28,7 @@ The strategy is chosen from the server version, and the chosen strategy is inclu
 | 15-17 | `STRATEGY=WAL_LOG` | `FILE_COPY` adds checkpoints before and after, and was slow in some runs on AlloyDB Omni 17 |
 | 14 or earlier | not specified | There is no `STRATEGY` clause |
 
-On a server where setting `file_copy_method` fails, the copy proceeds with `FILE_COPY` as is.
+On a server where setting `file_copy_method` fails, the copy proceeds with `FILE_COPY` as is. Managed AlloyDB 18.4 is such a server: it accepts only `copy`. `doctor` asks the server whether `clone` is accepted and reports `file_copy` when it is not.
 The strategy can be overridden with `PGCHECKOUT_STRATEGY`.
 
 `CREATE DATABASE ... TEMPLATE` does not copy the following 3 things (confirmed on PostgreSQL 18.7).
@@ -189,6 +189,7 @@ Dependencies are limited to `github.com/jackc/pgx/v5` and the official MCP Go SD
 | PostgreSQL 18.7 (Docker, XFS, `clone`) | 43-68 ms | 0.54 ms |
 | AlloyDB Omni 17.10 (Docker, ext4, `WAL_LOG`, 493 MB) | 0.95-1.02 s | 0.8-3.1 ms |
 | Managed AlloyDB 18.4 (8 vCPU, `FILE_COPY`, 1,029 MB) | 2.1-3.4 s | 15 ms |
+| Managed AlloyDB 18.4 (8 vCPU, `FILE_COPY`, 4,706 MB) | 3.0-4.6 s | not measured |
 
 Each is 1 to 4 measurements, and the variance was not examined.
 

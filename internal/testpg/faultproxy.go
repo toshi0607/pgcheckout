@@ -5,12 +5,14 @@ package testpg
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -78,7 +80,7 @@ func StartFaultProxy(t *testing.T, adminURL *url.URL, hook func(string) QueryFau
 				p.report("accept client", err)
 				return
 			}
-			workers.Go(func() { p.serve(ctx, client, upstream) })
+			workers.Go(func() { p.serve(ctx, client, upstream, cfg) })
 		}
 	})
 	return &proxyURL, p
@@ -95,7 +97,7 @@ type proxySession struct {
 	blackhole      atomic.Bool
 }
 
-func (p *FaultProxy) serve(ctx context.Context, client net.Conn, upstream string) {
+func (p *FaultProxy) serve(ctx context.Context, client net.Conn, upstream string, cfg *pgconn.Config) {
 	closeClient := p.closeOnCancel(ctx, client)
 	defer closeClient()
 	input := bufio.NewReader(client)
@@ -110,7 +112,6 @@ func (p *FaultProxy) serve(ctx context.Context, client net.Conn, upstream string
 	}
 	const (
 		cancelRequest = 80877102
-		sslRequest    = 80877103
 		gssencRequest = 80877104
 	)
 	code := binary.BigEndian.Uint32(startup[4:8])
@@ -127,6 +128,15 @@ func (p *FaultProxy) serve(ctx context.Context, client net.Conn, upstream string
 	}
 	closeServer := p.closeOnCancel(ctx, server)
 	defer closeServer()
+	if cfg.TLSConfig != nil {
+		server, err = negotiateUpstreamTLS(ctx, server, cfg)
+		if err != nil {
+			if ctx.Err() == nil {
+				p.t.Errorf("fault proxy negotiate upstream TLS: %v", err)
+			}
+			return
+		}
+	}
 	if _, err := server.Write(startup); err != nil {
 		p.report("forward startup packet", err)
 		return
@@ -276,5 +286,37 @@ func (p *FaultProxy) closeOnCancel(ctx context.Context, conn net.Conn) func() {
 func (p *FaultProxy) report(operation string, err error) {
 	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) {
 		p.t.Errorf("fault proxy %s: %v", operation, err)
+	}
+}
+
+const sslRequest = 80877103
+
+func negotiateUpstreamTLS(ctx context.Context, conn net.Conn, cfg *pgconn.Config) (net.Conn, error) {
+	var request [8]byte
+	binary.BigEndian.PutUint32(request[:4], uint32(len(request)))
+	binary.BigEndian.PutUint32(request[4:], sslRequest)
+	if _, err := conn.Write(request[:]); err != nil {
+		return nil, fmt.Errorf("send SSLRequest: %w", err)
+	}
+	var response [1]byte
+	if _, err := io.ReadFull(conn, response[:]); err != nil {
+		return nil, fmt.Errorf("read SSLRequest response: %w", err)
+	}
+	switch response[0] {
+	case 'S':
+		secured := tls.Client(conn, cfg.TLSConfig)
+		if err := secured.HandshakeContext(ctx); err != nil {
+			return nil, fmt.Errorf("handshake: %w", err)
+		}
+		return secured, nil
+	case 'N':
+		if slices.ContainsFunc(cfg.Fallbacks, func(fallback *pgconn.FallbackConfig) bool {
+			return fallback.Host == cfg.Host && fallback.Port == cfg.Port && fallback.TLSConfig == nil
+		}) {
+			return conn, nil
+		}
+		return nil, errors.New("upstream refused SSL and the connection configuration requires it")
+	default:
+		return nil, fmt.Errorf("unexpected SSLRequest response %q", response[0])
 	}
 }
